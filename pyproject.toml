@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lichen"
+version = "0.1.0"
+description = "A drop-in, API-compatible replacement for Jev, TypeSafe's System One model, on open-weight models run locally."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Jeff Ciesielski", email = "jeff@runmushroom.com"}]
+requires-python = ">=3.10"
+# llama-cpp-python needs a CUDA build for GPU use; see the README.
+dependencies = ["llama-cpp-python>=0.3.35", "numpy", "jinja2"]
+
+[project.scripts]
+lichen-server = "lichen.server:main"
+
+[tool.setuptools.packages.find]
+include = ["lichen*"]
