@@ -17,7 +17,10 @@ Lichen never generates text. Each question becomes one chat prompt that lists
 the possible answers as labels (letters for a choice, Yes and No for a yes/no
 question, digits for a score), and the answer is the probability the model
 gives each label as its next token. One forward pass yields the model's own
-distribution over the answers, with nothing to parse.
+distribution over the answers, with nothing to parse. The idea comes from
+Duarte O. Carmo's post [Jev in 25 lines of Python](https://www.nobodywho.ai/posts/jev-in-25-lines/)
+for NobodyWho. Lichen adds the prompt changes and the batching described below,
+and a server that speaks the TypeSafe API.
 
 ```mermaid
 flowchart LR
