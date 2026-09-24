@@ -25,8 +25,8 @@ ARG LLAMA_CPP_PYTHON="llama-cpp-python==0.3.35"
 # Extra CMake flags, for example -DGGML_CUDA_FORCE_CUBLAS=ON.
 ARG EXTRA_CMAKE=""
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-venv python3-dev git \
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends python3 python3-venv python3-dev git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /venv

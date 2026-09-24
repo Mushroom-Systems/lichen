@@ -139,6 +139,7 @@ The other rows are JevBench's published per-item outcomes on the same items
 |---|---|---|---|---|---|
 | Lichen, gemma-4-26B-A4B QAT Q4_0 | 48/48 | 71/72 | 88/111 | 0.896 | 0.093 |
 | Lichen, gemma-4-26B-A4B QAT Q4_0, rotations | 48/48 | 71/72 | 88/111 | 0.896 | 0.147 |
+| gemma-4-26B-A4B QAT Q4_0 alone, no prompt techniques | 48/48 | 71/72 | 83/111 | 0.874 | 0.085 |
 | Lichen, gemma-4-26B-A4B Q4_0 (not QAT), rotations | 48/48 | 71/72 | 85/111 | 0.883 | 0.151 |
 | Lichen, Qwen3.6-35B-A3B | 48/48 | 71/72 | 83/111 | 0.874 | 0.468 |
 | Lichen, Qwen3.5-9B | 48/48 | 71/72 | 82/111 | 0.870 | 0.195 |
@@ -193,6 +194,33 @@ Lichen gets more from Qwen3.6-35B-A3B (0.874) than the two published entries
 built on the same model (0.853 and 0.814). QAT is worth 3 hard items on
 gemma-4-26B-A4B at the same size and speed.
 
+### Against Jev and against the model alone
+
+Paired on the same items, the image's configuration and Jev 1.13 give the same
+verdict on 218 of the 231 public items. Of the other 13, Lichen is right on 10
+and Jev on 3 (exact McNemar p = 0.09): likely a real edge, not a significant
+one on this many items.
+
+The model alone is gemma-4-26B-A4B through the same server with the guard line
+and no other option: one copy of the state and question, the options listed
+once. On the hard tier:
+
+| Run | Hard | Input tokens | Compared with the model alone: right only here / there |
+|---|---|---|---|
+| model alone | 83/111 | 702 | |
+| repetition only (`--repeat 2`) | 84/111 | 1,337 | 8 / 7 |
+| rotations (the earlier configuration) | 88/111 | 2,965 | 9 / 4 |
+| the image's configuration | 88/111 | 1,416 | 10 / 5 |
+
+Each configuration of the prompt techniques gains more items than it loses
+against the model alone, but none of these differences is significant on 111
+items (p = 0.30 for the image's configuration). An independent run of the same
+configurations on RTX 3060 and 3090 GPUs found the same direction: 82 alone, 87
+with repetition only, and 86 with the image's configuration. Items decided by a
+margin of a few hundredths change between GPUs, and repetition alone moved from
++1 here to +5 there. The prompt techniques can gain more on other models; the same
+independent run measured 76 to 88 on Qwen3.8-27B (p = 0.004).
+
 ## Prompt layouts
 
 Each row is one JevBench run of the public items, with repetition, batching,
@@ -235,6 +263,19 @@ beat repeating it in the same order on gemma-4-E4B. On gemma-4-26B-A4B the
 letter map with two blocks matches full rotation on hard items with half the
 tokens and a p95 of 0.93 s instead of 2.7 s. Three blocks cost 2 hard items
 more than two.
+
+Three more changes were tried on gemma-4-26B-A4B with the image's
+configuration, each paired against it on the hard tier. Putting the question
+before the state in each copy (`--question-first`) scored 82/111, fixing 1 item
+and breaking 7. A third copy of the state and question (`--repeat 3`) scored
+89/111, fixing 1 and breaking none, with a calibration score of 80.7 against
+77.5, for 50% more input tokens (2,122) and a p95 of 1.49 s. Asking each option
+separately, whether it is the correct answer, and normalizing P(Yes) over the
+options scored 82/111 (3 fixed, 9 broken), and averaging it with the image's
+answer still broke 2 and fixed none; it was not kept. On all 13 hard choices the
+image's configuration gets wrong, neither block of the list puts the gold
+answer first, so a change that only re-reads the same prompt has little to
+recover.
 
 Two other changes were tried and dropped. Asking a noul as a lettered
 two-option choice (A. yes, B. no) in both orders cost gemma-4-E4B 4 hard items
@@ -399,7 +440,7 @@ Jev, and `bench/report.py` scores and compares the two.
 
 | Path | Contents |
 |---|---|
-| `results/jevbench/<model>.<tier>.jsonl` | JevBench harness results for each Lichen model on the public tiers (`easy`, `original` = standard, `hard`): the predicted label, the probabilities and the latency of every item. `gemma-4-26b-a4b-qat` and `gemma-4-e4b-qat` are the image's configuration; `-rotations` and the other models are the earlier one |
+| `results/jevbench/<model>.<tier>.jsonl` | JevBench harness results for each Lichen model on the public tiers (`easy`, `original` = standard, `hard`): the predicted label, the probabilities and the latency of every item. `gemma-4-26b-a4b-qat` and `gemma-4-e4b-qat` are the image's configuration; `-rotations` and the other models are the earlier one; `-plain` is the model alone |
 | `bench/cases.py`, `bench/cases_hard.py` | this project's easy (48) and hard (50) case sets, with their gold answers |
 | `bench/run_cases.py`, `bench/ask_jev.py`, `bench/report.py` | answer a case set with local models or with Jev, and compare the answers |
 | `bench/jevbench_compare.py` | the JevBench comparison table from these runs and JevBench's published per-item file |

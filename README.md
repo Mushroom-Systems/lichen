@@ -7,9 +7,13 @@ score) with a probability for every option, so existing Jev clients work
 against it without changes.
 
 On the 231 public decisions of [JevBench](https://github.com/fstandhartinger/jevbench),
-Lichen with Google's gemma-4-26B-A4B answers 89.6% correctly, against 86.6% for
-Jev 1.13, at a median latency of 93 ms per decision on a single laptop GPU;
-Jev's hosted API takes 665 ms.
+Lichen with Google's gemma-4-26B-A4B and its default options answers 207
+correctly, against 200 for Jev 1.13. The two disagree on 13 items, 10 of them in
+Lichen's favour: likely a real edge, though not statistically significant on this
+many items (p = 0.09). The model alone, without Lichen's prompt techniques,
+answers 202. The techniques probably add a few points on the hard tier, and
+they reach that accuracy with half the input tokens of asking once per rotation
+of the options. A decision takes 93 ms at the median on one laptop GPU.
 
 ## How it works
 
@@ -32,8 +36,9 @@ flowchart LR
     S --> O["reply<br/>choice, yes/no or score<br/>+ confidence"]
 ```
 
-Two changes to the prompt make the answers more accurate, and two changes to
-how the answer is read make its confidence honest.
+Two changes to the prompt aim at more accurate answers, and two changes to how
+the answer is read make its confidence honest. On gemma-4-26B-A4B the prompt
+changes add a few hard items; on smaller models they add more.
 
 A causal model reads the prompt left to right, so it takes in the state before
 it knows what will be asked about it. Lichen writes the state and the question
@@ -71,6 +76,7 @@ Public items of JevBench v1.4, scored by JevBench's own harness:
 | System | Easy | Standard | Hard | Accuracy | Median latency |
 |---|---|---|---|---|---|
 | Lichen, gemma-4-26B-A4B QAT | 48/48 | 71/72 | 88/111 | 0.896 | 93 ms |
+| gemma-4-26B-A4B QAT alone (no prompt techniques) | 48/48 | 71/72 | 83/111 | 0.874 | 85 ms |
 | Lichen, Qwen3.6-35B-A3B\* | 48/48 | 71/72 | 83/111 | 0.874 | 468 ms |
 | Lichen, Qwen3.5-9B\* | 48/48 | 71/72 | 82/111 | 0.870 | 195 ms |
 | Jev 1.13.0 (TypeSafe, hosted) | 48/48 | 71/72 | 81/111 | 0.866 | 665 ms |
@@ -78,6 +84,13 @@ Public items of JevBench v1.4, scored by JevBench's own harness:
 
 \* Measured with the earlier configuration, which asked each choice once per
 rotation of its options instead of listing them twice.
+
+The model alone was run through the same server with the guard line and none
+of the other options. Lichen's latencies are local, one request at a time on an
+otherwise idle GPU; Jev's are its hosted API, including the network round trip,
+so the column compares deployments rather than models. Items decided by a small
+margin can come out differently on another GPU, so a difference of a few hard
+items between two rows is within that variation.
 
 On the hard tier, gemma-4-26B-A4B also has a calibration error (ECE) of 0.120
 and a JevBench calibration score of 77.5; Jev's on the published board is 76.3.
@@ -107,6 +120,12 @@ faster (`120` for RTX 50-series, `89` for RTX 40-series, `86` for RTX 30-series)
 ```
 docker build -t lichen --build-arg CUDA_ARCHITECTURES=120 .
 ```
+
+If `apt-get` fails with a 404 during the build, the Ubuntu mirror's index is
+ahead of its packages; building again later usually works. A build that must
+succeed now can list only `archive.ubuntu.com` (suites `noble noble-updates
+noble-backports`) in `/etc/apt/sources.list.d/ubuntu.sources` before
+`apt-get update`, since Ubuntu also publishes security fixes to `-updates`.
 
 Start the server. The image turns on the configuration described above, with
 a 16k context:
@@ -182,7 +201,7 @@ lists all of them.
 | `--model PATH` | The GGUF file to serve. Required. |
 | `--n-ctx N` | Context in tokens; 16384 in the image. |
 | `--n-ubatch N` | Tokens per GPU pass, 1024 by default. 2048 makes long prompts 7-9% faster and cost 2 of the 111 hard JevBench items. |
-| `--repeat N` | Copies of the state and question in the prompt; 2 in the image. |
+| `--repeat N` | Copies of the state and question in the prompt; 2 in the image. 3 added one hard JevBench item and improved calibration, for 50% more input tokens. |
 | `--fibers M`, `--fiber-map` | List each option M times in one prompt, in rotated blocks, and read the answer as the sum over each option's letters; with `--fiber-map`, list the options first and then map letters to them. The image uses 2 and the map. |
 | `--permute` | Ask a choice once per rotation of its options and average. With `--fibers`, only a list that would pass 62 letters falls back to this; without `--permute`, such a list is asked once. |
 | `--shrink` | Move each answer toward uniform by how far its readings disagree. On in the image. |
