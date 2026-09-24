@@ -6,7 +6,7 @@ PER_TASK.json is JevBench's results/v1.2/jevbench-v1.2-per-task.json, which
 holds every published system's outcome and latency on each public item.
 RUNS_DIR holds this project's runs as NAME.easy.jsonl, NAME.original.jsonl
 and NAME.hard.jsonl, written by `jevbench run --adapter typesafe` against
-server.py. An item counts when the harness scored it (`correct` not None).
+lichen.server. An item counts when the harness scored it (`correct` not None).
 """
 
 import json

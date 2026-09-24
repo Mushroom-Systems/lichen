@@ -176,8 +176,9 @@ class Evaluator:
         return out, (shared - keep) + len(items)
 
 
-def label_probabilities(model: Llama, logits: numpy.ndarray, labels: list[str]) -> numpy.ndarray:
-    """Softmax over the token of each label.
+def label_probabilities(model: Llama, logits: numpy.ndarray, labels: list[str],
+                        temperature: float = 1.0) -> numpy.ndarray:
+    """Softmax over the token of each label, of the logits divided by `temperature`.
 
     A label of more than one token, or two labels with the same token, cannot
     be read from one next-token distribution, so either is an error rather
@@ -189,5 +190,5 @@ def label_probabilities(model: Llama, logits: numpy.ndarray, labels: list[str]) 
     token_ids = [t[0] for t in tokens]
     if len(set(token_ids)) != len(token_ids):
         raise ValueError(f"labels share a token: {labels} -> {token_ids}")
-    choice_logits = numpy.asarray([logits[i] for i in token_ids])
+    choice_logits = numpy.asarray([logits[i] for i in token_ids]) / temperature
     return numpy.exp(choice_logits - numpy.logaddexp.reduce(choice_logits))

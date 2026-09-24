@@ -26,12 +26,33 @@ rotate_last     With permute and repeat, rotate the options of the last copy
 options_once    With repeat, list the options once, at the end. Faster, and less
                 accurate: the whole message has to be repeated.
 question_first  Put the question before the state in each copy.
+fibers          List each choice option this many times in one prompt, in blocks
+                of different rotations under distinct letters, and add up the
+                probabilities of each option's letters. One prompt stands in for
+                the rotations. A list longer than the 62 labels falls back to
+                the rotations with permute, and is asked once without it.
+fiber_same      With fibers, repeat the blocks in the same order, not rotated.
+fiber_map       With fibers, list the options without letters, then map each
+                letter to an option name.
+runoff          When a choice's readings disagree by more than this, ask its two
+                leading options alone, in both orders, and split their mass by
+                that answer. 0 turns it off. On JevBench it helped gemma-4-E4B
+                (+3 hard items) and hurt gemma-4-26B-A4B (-4): it pays only
+                where most of the answers it re-asks are wrong.
+temperature     Divide the label logits by this before each softmax. Raw label
+                probabilities are too sharp; above 1 softens them.
+shrink          Move each answer toward uniform by how far its readings (the
+                rotations, or the fiber blocks) disagree: the mean pairwise total
+                variation distance between them. The top answer never changes;
+                answers the readings disagree on get less confidence.
 recheck         Write the first answer back and ask again. The model agrees with
                 itself, and the answers got worse.
 embedding       The model is an embedding model; answer by cosine similarity
                 (`embed.py`).
 
-Lichen serves `SYSTEM + GUARD`, permute, repeat 2 and batch by default.
+The Docker image serves `SYSTEM + GUARD` with repeat 2, permute, batch, fibers 2,
+fiber_map, shrink and temperature 1.25. The library's own defaults leave them
+all off.
 """
 
 import argparse
@@ -65,6 +86,17 @@ class Method:
     batch: bool = False
     recheck: bool = False
     embedding: bool = False
+    fibers: int = 1
+    fiber_same: bool = False
+    fiber_map: bool = False
+    shrink: bool = False
+    runoff: float = 0.0
+    temperature: float = 1.0
+
+
+# Choice labels, in order. Each is one token in the models measured; see
+# `label_probabilities`, which raises if a model splits one.
+LABELS = list(string.ascii_uppercase + string.ascii_lowercase + string.digits)
 
 
 def text(value, compact: bool = False) -> str:
@@ -122,11 +154,18 @@ def question_split(question: dict, compact: bool = False) -> tuple[str, str, lis
     criteria = question.get("criteria")
     match question["type"]:
         case "choice":
-            keys = list(criteria)
-            labels = list(string.ascii_uppercase[: len(keys)])
+            keys = question.get("fiber_keys") or list(criteria)
+            labels = LABELS[: len(keys)]
             lines = [f"{l}. {k}" + (f": {text(criteria[k], compact)}" if criteria[k] else "")
                      for l, k in zip(labels, keys, strict=True)]
-            return head, "Options:\n" + "\n".join(lines) + "\n\nAnswer with one letter.", labels, keys
+            if question.get("fiber_map"):
+                described = [k + (f": {text(criteria[k], compact)}" if criteria[k] else "") for k in keys]
+                mapping = [f"{l} -> {k}" for l, k in zip(labels, keys, strict=True)]
+                return head, ("Options:\n" + "\n".join(described) + "\n\nAnswer letters:\n" + "\n".join(mapping)
+                              + "\n\nEach option has more than one letter. Answer with one letter."), labels, keys
+            note = ("Each option is listed more than once, under different letters.\n"
+                    if "fiber_keys" in question else "")
+            return head, "Options:\n" + "\n".join(lines) + f"\n\n{note}Answer with one letter.", labels, keys
         case "noul":
             meaning = ""
             if criteria:
@@ -203,6 +242,19 @@ def rotations(case: dict) -> list[dict]:
             for s in range(len(keys))]
 
 
+def variants(case: dict, method: Method) -> list[dict]:
+    """The prompts a question is asked as: one fibered list, its rotations, or itself."""
+    question = case["question"]
+    if method.fibers > 1 and question["type"] == "choice":
+        keys = list(question["criteria"])
+        n = len(keys)
+        if n * method.fibers <= len(LABELS):
+            offsets = [0 if method.fiber_same else j * n // method.fibers for j in range(method.fibers)]
+            return [{**case, "question": {**question, "fiber_map": method.fiber_map,
+                                          "fiber_keys": [k for s in offsets for k in keys[s:] + keys[:s]]}}]
+    return rotations(case) if method.permute else [case]
+
+
 def batched_logits(evaluator: Evaluator, prompts: list[str]) -> tuple[list[numpy.ndarray], int]:
     """Logits for every prompt, in groups that fit the evaluator's sequences and context.
 
@@ -225,32 +277,88 @@ def batched_logits(evaluator: Evaluator, prompts: list[str]) -> tuple[list[numpy
         return head + tail, n + m
 
 
+def readings(p: numpy.ndarray, variant_keys: list[str]) -> list[dict]:
+    """One prompt's label probabilities as separate readings of the question.
+
+    A fibered list gives one reading per block of its letters; any other
+    prompt is one reading. The masses are as read, not renormalized.
+    """
+    n = len(set(variant_keys))
+    return [{k: float(v) for k, v in zip(variant_keys[s:s + n], p[s:s + n], strict=True)}
+            for s in range(0, len(variant_keys), n)]
+
+
 def probabilities(model: Llama, case: dict, method: Method, name: str,
-                  evaluator: Evaluator | None = None) -> tuple[numpy.ndarray, list[str], int]:
-    """P over the answer keys, in the question's own key order, and the tokens evaluated."""
+                  evaluator: Evaluator | None = None) -> tuple[numpy.ndarray, list[str], int, list[dict]]:
+    """P over the answer keys in the question's own key order, the tokens
+    evaluated, and every reading that went into P (see `readings`)."""
     _, _, keys = render(name, model, case, method)
-    total, tokens = dict.fromkeys(keys, 0.0), 0
-    variants = rotations(case) if method.permute else [case]
+    tokens, parts = 0, []
+    asked = variants(case, method)
     if method.batch and not method.recheck:
-        rendered = [render(name, model, v, method) for v in variants]
+        rendered = [render(name, model, v, method) for v in asked]
         logits, tokens = batched_logits(evaluator, [prompt for prompt, _, _ in rendered])
         for (_, labels, variant_keys), row in zip(rendered, logits, strict=True):
-            p = label_probabilities(model, row, labels)
-            for k, v in zip(variant_keys, p, strict=True):
-                total[k] += float(v) / len(variants)
-        return numpy.asarray([total[k] for k in keys]), keys, tokens
-    for variant in variants:
-        prompt, labels, variant_keys = render(name, model, variant, method)
-        p = label_probabilities(model, last_logits(model, prompt), labels)
-        tokens += model.n_tokens
-        if method.recheck:
-            first = labels[int(numpy.argmax(p))].strip()
-            prompt, labels, _ = render(name, model, variant, method, previous=first)
-            p = label_probabilities(model, last_logits(model, prompt), labels)
+            parts += readings(label_probabilities(model, row, labels, method.temperature), variant_keys)
+    else:
+        for variant in asked:
+            prompt, labels, variant_keys = render(name, model, variant, method)
+            p = label_probabilities(model, last_logits(model, prompt), labels, method.temperature)
             tokens += model.n_tokens
-        for k, v in zip(variant_keys, p, strict=True):
-            total[k] += float(v) / len(variants)
-    return numpy.asarray([total[k] for k in keys]), keys, tokens
+            if method.recheck:
+                first = labels[int(numpy.argmax(p))].strip()
+                prompt, labels, _ = render(name, model, variant, method, previous=first)
+                p = label_probabilities(model, last_logits(model, prompt), labels, method.temperature)
+                tokens += model.n_tokens
+            parts += readings(p, variant_keys)
+    # A fibered list's blocks add up to its answer; separate prompts average.
+    per_prompt = len(parts) // len(asked)
+    total = numpy.asarray([sum(r.get(k, 0.0) for r in parts) for k in keys]) * per_prompt / len(parts)
+    lam = disagreement(parts)
+    if method.runoff and case["question"]["type"] == "choice" and len(keys) > 2 and lam > method.runoff:
+        total, more, extra = runoff(model, case, method, name, evaluator, keys, total)
+        tokens, parts = tokens + more, parts + extra
+    if method.shrink:
+        total = (1 - lam) * total + lam / len(keys)
+    return total, keys, tokens, parts
+
+
+def runoff(model: Llama, case: dict, method: Method, name: str, evaluator: Evaluator | None,
+           keys: list[str], total: numpy.ndarray) -> tuple[numpy.ndarray, int, list[dict]]:
+    """Ask the two leading options alone, in both orders, and split their mass by that answer.
+
+    The other options keep their probabilities. Returns the new P, the tokens
+    evaluated and the two runoff readings.
+    """
+    a, b = (keys[i] for i in numpy.argsort(-total)[:2])
+    criteria = case["question"]["criteria"]
+    pair = {**case, "question": {**case["question"], "criteria": {a: criteria[a], b: criteria[b]}}}
+    rendered = [render(name, model, v, method) for v in rotations(pair)]
+    if method.batch:
+        logits, tokens = batched_logits(evaluator, [prompt for prompt, _, _ in rendered])
+    else:
+        logits = [last_logits(model, prompt) for prompt, _, _ in rendered]
+        tokens = sum(len(model.tokenize(prompt.encode(), add_bos=False, special=True)) for prompt, _, _ in rendered)
+    extra = [dict(zip(variant_keys, map(float, label_probabilities(model, row, labels, method.temperature)),
+                      strict=True))
+             for (_, labels, variant_keys), row in zip(rendered, logits, strict=True)]
+    share = numpy.mean([r[a] / (r[a] + r[b]) for r in extra])
+    out = total.copy()
+    mass = out[keys.index(a)] + out[keys.index(b)]
+    out[keys.index(a)], out[keys.index(b)] = mass * share, mass * (1 - share)
+    return out, tokens, extra
+
+
+def disagreement(parts: list[dict]) -> float:
+    """Mean pairwise total variation distance between readings, each renormalized.
+
+    0 when every reading gives the same distribution, 1 when each puts all its
+    mass on a different answer, and 0 for a single reading.
+    """
+    rows = [numpy.asarray(list(r.values())) / sum(r.values()) for r in
+            ({k: r[k] for k in sorted(r)} for r in parts)]
+    pairs = [(a, b) for i, a in enumerate(rows) for b in rows[i + 1:]]
+    return float(numpy.mean([0.5 * numpy.abs(a - b).sum() for a, b in pairs])) if pairs else 0.0
 
 
 def answer(model: Llama, case: dict, method: Method = Method(), name: str = "",
@@ -260,11 +368,12 @@ def answer(model: Llama, case: dict, method: Method = Method(), name: str = "",
     if method.embedding:
         from . import embed
         p, keys, tokens = embed.probabilities(model, case)
+        parts = []
     else:
-        p, keys, tokens = probabilities(model, case, method, name, evaluator)
+        p, keys, tokens, parts = probabilities(model, case, method, name, evaluator)
     ms = (time.perf_counter() - start) * 1000
     probs = {k: round(float(v), 4) for k, v in zip(keys, p, strict=True)}
-    out = {"type": question["type"], "latency_ms": ms, "prompt_tokens": tokens}
+    out = {"type": question["type"], "latency_ms": ms, "prompt_tokens": tokens, "readings": parts}
     match question["type"]:
         case "choice":
             out |= {"choice": keys[int(numpy.argmax(p))], "probabilities": probs,
@@ -337,6 +446,17 @@ def method_arguments(ap: argparse.ArgumentParser) -> None:
                     help="put the question before the state, so the prefix cache keeps it between asks")
     ap.add_argument("--batch", action="store_true", help="share each question's prefix and batch its rotations")
     ap.add_argument("--recheck", action="store_true", help="ask a second turn and read that answer")
+    ap.add_argument("--fibers", type=positive, default=1, metavar="M",
+                    help="list each choice option M times in one prompt instead of rotating (1: off)")
+    ap.add_argument("--fiber-same", action="store_true", help="with --fibers, repeat the blocks unrotated")
+    ap.add_argument("--fiber-map", action="store_true",
+                    help="with --fibers, list the options without letters, then map letters to options")
+    ap.add_argument("--shrink", action="store_true",
+                    help="move each answer toward uniform by how far its readings disagree")
+    ap.add_argument("--temperature", type=float, default=1.0, metavar="T",
+                    help="divide the label logits by T before the softmax (1: off)")
+    ap.add_argument("--runoff", type=float, default=0.0, metavar="D",
+                    help="re-ask a choice's top two options when its readings disagree by more than D (0: off)")
     ap.add_argument("--n-ubatch", type=positive, default=1024, help="tokens per GPU pass in the --batch evaluator")
     ap.add_argument("--kv", action="append", default=[], metavar="KEY=VALUE",
                     help="override model metadata at load, e.g. gemma4.expert_used_count=6; repeatable")
@@ -349,4 +469,5 @@ def method_from(args: argparse.Namespace, guard: bool) -> Method:
         raise SystemExit("--recheck does not work with --batch")
     return Method(SYSTEM + GUARD if guard else SYSTEM, args.permute, args.repeat, args.options_once,
                   args.question_first, args.compact_json, args.rotate_last, args.batch, args.recheck,
-                  args.embedding)
+                  args.embedding, args.fibers, args.fiber_same, args.fiber_map,
+                  args.shrink, args.runoff, args.temperature)

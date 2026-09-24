@@ -1,6 +1,7 @@
 """A local stand-in for TypeSafe's System One endpoint, backed by one GGUF model.
 
-    python -m lichen.server --model MODEL.gguf [--repeat 2 --permute --batch] [--n-ctx N] [...]
+    python -m lichen.server --model MODEL.gguf [--repeat 2 --permute --batch --fibers 2 --fiber-map
+        --shrink --temperature 1.25] [--n-ctx N] [...]
 
 `--help` lists every option.
 
@@ -12,11 +13,12 @@ confidence. A request's `model` field is accepted and ignored, since the reply
 names the model this server loaded, and no Authorization header is checked.
 
 Differences from TypeSafe:
-- A choice may have at most 26 options (one letter each); TypeSafe allows 255.
+- A choice may have at most 62 options (A-Z, a-z, 0-9); TypeSafe allows 255.
 - Questions in one request are answered one after another, each from an
   empty context, unless --batch, which keeps the shared prefix cached.
-  --permute, --repeat, --options-once and --recheck change how a question is
-  put and how many passes it takes; see lichen/method.py.
+  --permute, --fibers, --repeat, --shrink and the other method options
+  change how a question is put and how many passes it takes; see
+  lichen/method.py.
 - Requests are served one at a time, because a llama.cpp context is not
   safe to share between threads.
 
@@ -24,6 +26,7 @@ GET /health answers 200 with the loaded model's name once the model is loaded.
 """
 
 import argparse
+import hashlib
 import json
 import pathlib
 import sys
@@ -33,11 +36,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from llama_cpp import Llama
 
-from .method import Method, answer, load, method_arguments, method_from, parse_overrides, positive
+from .method import LABELS, Method, answer, load, method_arguments, method_from, parse_overrides, positive
 from .runtime import Evaluator
 from .runtime import ContextOverflow
 
-MAX_OPTIONS = 26
+MAX_OPTIONS = len(LABELS)
 MAX_LEVELS = 10
 MAX_BODY = 8 << 20  # bytes; a 16k-token context holds far less
 
@@ -95,17 +98,30 @@ def parse_request(raw: bytes) -> Request:
     return Request(body["state"], {qid: parse_question(qid, q) for qid, q in questions.items()})
 
 
-def respond(model: Llama, name: str, method: Method, evaluator: Evaluator | None, request: Request) -> dict:
+def trace_line(state, question: dict, a: dict) -> str:
+    """One question's readings as a JSON line, keyed by a hash of its state."""
+    state_sha = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
+    served = a.get("probabilities") or {"yes": a.get("noul")}
+    return json.dumps({"state_sha256": state_sha, "instructions": question["instructions"],
+                       "type": question["type"], "answer": served, "readings": a["readings"]})
+
+
+def respond(model: Llama, name: str, method: Method, evaluator: Evaluator | None, request: Request,
+            trace=None) -> dict:
     answers, input_tokens = {}, 0
     for qid, question in request.questions.items():
         a = answer(model, {"state": request.state, "question": question}, method, name, evaluator)
+        if trace:
+            print(trace_line(request.state, question, a), file=trace, flush=True)
         input_tokens += a.pop("prompt_tokens")
         a.pop("latency_ms")
+        a.pop("readings")
         answers[qid] = a
     return {"model": name, "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 0}}
 
 
-def handler(model: Llama, name: str, method: Method, evaluator: Evaluator | None) -> type[BaseHTTPRequestHandler]:
+def handler(model: Llama, name: str, method: Method, evaluator: Evaluator | None,
+            trace=None) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         timeout = 30  # seconds a client may take to send its request
 
@@ -137,7 +153,7 @@ def handler(model: Llama, name: str, method: Method, evaluator: Evaluator | None
                 return
             raw = self.rfile.read(length)
             try:
-                reply = respond(model, name, method, evaluator, parse_request(raw))
+                reply = respond(model, name, method, evaluator, parse_request(raw), trace)
             except (BadRequest, ContextOverflow) as exc:
                 self._send(422, {"detail": str(exc)})
                 return
@@ -163,13 +179,16 @@ def main() -> None:
     ap.add_argument("--n-ctx", type=positive, default=32768)
     ap.add_argument("--no-guard", action="store_true",
                     help="leave out the sentence that tells the model the state is data")
+    ap.add_argument("--trace", metavar="PATH",
+                    help="append each question's separate readings (rotations or fiber blocks) to PATH as JSON lines")
     method_arguments(ap)
     args = ap.parse_args()
     name = pathlib.Path(args.model).stem
     method = method_from(args, guard=not args.no_guard)
     model, evaluator = load(args.model, args.n_ctx, method, args.n_ubatch, parse_overrides(args.kv))
     print(f"serving {name} on {args.host}:{args.port}, n_ctx {args.n_ctx}, {method}", file=sys.stderr, flush=True)
-    HTTPServer((args.host, args.port), handler(model, name, method, evaluator)).serve_forever()
+    trace = open(args.trace, "a", encoding="utf-8") if args.trace else None
+    HTTPServer((args.host, args.port), handler(model, name, method, evaluator, trace)).serve_forever()
 
 
 if __name__ == "__main__":

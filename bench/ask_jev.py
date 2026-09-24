@@ -7,7 +7,7 @@ CASES names a module that defines CASES, such as `cases` or `cases_hard`.
 Answers already in OUT.json are kept, so a rerun asks only the new cases.
 The key comes from TYPESAFE_API_KEY or ~/.config/typesafe/env. SYSTEMONE_URL
 sends the requests to another endpoint with the same format, such as
-server.py; that endpoint checks no key.
+lichen.server; that endpoint checks no key.
 """
 
 import importlib

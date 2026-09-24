@@ -5,8 +5,11 @@
 #       lichen --model /models/gemma-4-26B_q4_0-it.gguf
 #
 # The server listens on 0.0.0.0:8765 and answers POST /v1/systemone. The
-# entrypoint turns on the measured configuration (repeat 2, option rotation,
-# batching, a 16k context); arguments after the image name are added to it, see
+# entrypoint turns on the measured configuration (repeat 2, each choice option
+# listed twice with a letter mapping, rotation for a list past 62 letters,
+# batching, confidence shrunk by disagreement, label temperature 1.25, a 16k
+# context); arguments after the image name are added to it, and a repeated
+# option replaces the default, see
 # `docker run --rm --gpus all lichen --help` (the CUDA runtime needs the GPU
 # even to print the help).
 FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
@@ -45,5 +48,6 @@ RUN useradd --system --no-create-home lichen
 USER lichen
 
 EXPOSE 8765
-ENTRYPOINT ["python3", "-m", "lichen.server", "--repeat", "2", "--permute", "--batch", "--n-ctx", "16384"]
+ENTRYPOINT ["python3", "-m", "lichen.server", "--repeat", "2", "--permute", "--batch", \
+            "--fibers", "2", "--fiber-map", "--shrink", "--temperature", "1.25", "--n-ctx", "16384"]
 CMD ["--help"]
