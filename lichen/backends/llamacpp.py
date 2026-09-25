@@ -1,23 +1,34 @@
-"""The model side of Lichen: chat templates, next-token logits, and label probabilities.
+"""The llama.cpp backend: chat templates, next-token logits, and label probabilities.
 
 A judgment is read from one forward pass: render the chat prompt with the
 model's own template, evaluate it, take the logits at the last position, and
 softmax over the first token of each answer label. The Evaluator does this for
 several prompts at once, evaluating the prefix they share only once.
+
+`method` writes the messages and reads the answer; everything here knows
+llama.cpp, which is why `import llama_cpp` -- and the libcuda it loads -- lives
+in this module and nowhere else.
 """
 
-from __future__ import annotations
-
 import functools
+import pathlib
 
+import llama_cpp
 import numpy
 from jinja2 import nodes
 from jinja2.ext import Extension
 from jinja2.sandbox import ImmutableSandboxedEnvironment
-from typing import TYPE_CHECKING
+from llama_cpp import Llama
 
-if TYPE_CHECKING:  # annotation only -- importing llama_cpp needs libcuda,
-    from llama_cpp import Llama  # which a vLLM-only install does not have
+from ..method import ContextOverflow, Method, chat_messages, question_part, state_part
+from . import embed
+
+# Qwen3Guard's own template can only ask its fixed safety question, so it is
+# given the plain Qwen3 chat format, with thinking closed as Qwen3 does it.
+CHATML = (
+    "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"
+    "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+)
 
 
 def _raise_exception(message: str):
@@ -63,12 +74,42 @@ def chat_prompt(model: Llama, messages: list[dict], template: str | None = None,
     )
 
 
-class ContextOverflow(ValueError):
-    """The prompt has more tokens than the model's context holds."""
+def render(name: str, model: Llama, case: dict, method: Method,
+           previous: str | None = None) -> tuple[str, list[str], list[str]]:
+    """The prompt for one case, and the labels to read and the keys they stand for.
+
+    `previous` is the label of a first answer to write back for a recheck.
+    """
+    if "granite-guardian" in name:
+        # Granite Guardian judges the user message against `custom_criteria` and
+        # answers "<score> yes </score>". The question goes in the criteria, the
+        # state is the message, and the prompt ends at "<score>" so the next
+        # token is the label, with the leading space its tokenizer puts on it
+        # where the space and the label make one token.
+        body, labels, keys = question_part(case["question"])
+        if case["question"]["type"] == "noul":
+            labels = ["yes", "no"]
+            body = body.replace("Answer Yes or No.", "Answer yes or no.")
+        criteria, _, schema = body.rpartition("\n\n")
+        prompt = chat_prompt(model, [{"role": "user", "content": state_part(case["state"])}],
+                             guardian_config={"custom_criteria": criteria, "custom_scoring_schema": schema})
+        spaced = [" " + l for l in labels]
+        if all(len(model.tokenize(l.encode(), add_bos=False)) == 1 for l in spaced):
+            return prompt + "<score>", spaced, keys
+        return prompt + "<score> ", labels, keys  # digits: the space is its own token
+    messages, labels, keys = chat_messages(case, method, previous)
+    template = CHATML if "Qwen3Guard" in name else None
+    prompt = chat_prompt(model, messages, template)
+    # Some templates open a reasoning block for the reply and have no switch to
+    # leave it out (LFM2.5 always ends in "<think>"). Closing it at once gives an
+    # empty block, as the Qwen and Nemotron templates do with thinking off, so
+    # the next token is the answer.
+    if prompt.endswith("<think>"):
+        prompt += "</think>"
+    return prompt, labels, keys
 
 
 def last_logits(model: Llama, prompt: str) -> numpy.ndarray:
-    import llama_cpp  # lazy: only this path needs the library
     """Evaluate `prompt` from an empty context and return the next-token logits."""
     tokens = model.tokenize(prompt.encode(), add_bos=False, special=True)
     if len(tokens) > model.n_ctx():
@@ -108,7 +149,6 @@ class Evaluator:
     """
 
     def __init__(self, model: Llama, n_ctx: int = 8192, n_seq: int = 8, n_ubatch: int = 1024):
-        import llama_cpp  # lazy, as in last_logits
         params = llama_cpp.llama_context_default_params()
         params.n_ctx = n_ctx
         params.n_batch = n_ctx
@@ -198,3 +238,121 @@ def label_probabilities(model: Llama, logits: numpy.ndarray, labels: list[str],
         raise ValueError(f"labels share a token: {labels} -> {token_ids}")
     choice_logits = numpy.asarray([logits[i] for i in token_ids]) / temperature
     return numpy.exp(choice_logits - numpy.logaddexp.reduce(choice_logits))
+
+
+def batched_logits(evaluator: Evaluator, prompts: list[str]) -> tuple[list[numpy.ndarray], int]:
+    """Logits for every prompt, in groups that fit the evaluator's sequences and context.
+
+    A choice may have more options than the evaluator has sequences, and many
+    long prompts may not fit its context together; a group that does not fit
+    is split in half. One prompt too long for the context still raises.
+    """
+    if len(prompts) > evaluator.n_seq:
+        head, n = batched_logits(evaluator, prompts[:evaluator.n_seq])
+        tail, m = batched_logits(evaluator, prompts[evaluator.n_seq:])
+        return head + tail, n + m
+    try:
+        return evaluator.logits(prompts)
+    except ContextOverflow:
+        if len(prompts) == 1:
+            raise
+        half = len(prompts) // 2
+        head, n = batched_logits(evaluator, prompts[:half])
+        tail, m = batched_logits(evaluator, prompts[half:])
+        return head + tail, n + m
+
+
+def parse_overrides(pairs: list[str]) -> dict:
+    """llama.cpp metadata overrides from KEY=VALUE, such as gemma4.expert_used_count=6.
+
+    A value that reads as an integer or a float is passed as one; true and
+    false as booleans; anything else as a string.
+    """
+    out = {}
+    for pair in pairs:
+        key, _, raw = pair.partition("=")
+        if not key or not raw:
+            raise ValueError(f"expected KEY=VALUE, got {pair!r}")
+        if raw in ("true", "false"):
+            out[key] = raw == "true"
+            continue
+        for kind in (int, float):
+            try:
+                out[key] = kind(raw)
+                break
+            except ValueError:
+                pass
+        else:
+            out[key] = raw
+    return out
+
+
+class Gguf:
+    """A GGUF model on the local GPU.
+
+    `label_probs` reads a question's variants: with `method.batch` they go
+    through the Evaluator, which evaluates the prefix they share once,
+    otherwise one at a time from an empty context.
+    """
+
+    threaded = False  # a llama.cpp context is not safe to share between threads
+
+    def __init__(self, name: str, model: Llama, n_ctx: int, evaluator: Evaluator | None = None):
+        # n_ctx is the context a judgment gets: with --batch the Llama's own is
+        # 256 and the Evaluator holds this one, so it is worth reporting.
+        self.name, self.model, self.evaluator, self.where = name, model, evaluator, f"n_ctx {n_ctx}"
+
+    def label_probs(self, asked: list[dict], method: Method) -> tuple[list[numpy.ndarray], int]:
+        """The label probabilities of each variant, and the tokens evaluated for them."""
+        if method.batch and not method.recheck:
+            rendered = [render(self.name, self.model, v, method) for v in asked]
+            logits, tokens = batched_logits(self.evaluator, [prompt for prompt, _, _ in rendered])
+            return [label_probabilities(self.model, row, labels, method.temperature)
+                    for (_, labels, _), row in zip(rendered, logits, strict=True)], tokens
+        probs, tokens = [], 0
+        for variant in asked:
+            prompt, labels, _ = render(self.name, self.model, variant, method)
+            p = label_probabilities(self.model, last_logits(self.model, prompt), labels, method.temperature)
+            tokens += self.model.n_tokens
+            if method.recheck:
+                first = labels[int(numpy.argmax(p))].strip()
+                prompt, labels, _ = render(self.name, self.model, variant, method, previous=first)
+                p = label_probabilities(self.model, last_logits(self.model, prompt), labels, method.temperature)
+                tokens += self.model.n_tokens
+            probs.append(p)
+        return probs, tokens
+
+    def close(self) -> None:
+        if self.evaluator:
+            self.evaluator.close()
+        self.model.close()
+
+
+class Embedding:
+    """An embedding model, which answers by cosine similarity rather than label logits."""
+
+    threaded = False
+
+    def __init__(self, name: str, model: Llama, n_ctx: int):
+        self.name, self.model, self.where = name, model, f"n_ctx {n_ctx}"
+
+    def similarities(self, case: dict) -> tuple[numpy.ndarray, list[str], int]:
+        return embed.probabilities(self.model, case)
+
+    def close(self) -> None:
+        self.model.close()
+
+
+def backend(gguf: str, n_ctx: int, method: Method, n_ubatch: int = 1024,
+            kv: list[str] | None = None) -> Gguf | Embedding:
+    """The model, with an Evaluator on it when `method.batch`.
+
+    With --batch the Llama object only tokenizes and renders, so its own
+    context is kept small and the Evaluator holds the KV cache.
+    """
+    name = pathlib.Path(gguf).stem
+    if method.embedding:
+        return Embedding(name, embed.load(gguf), n_ctx)
+    model = Llama(model_path=gguf, n_ctx=256 if method.batch else n_ctx, n_gpu_layers=-1, verbose=False,
+                  kv_overrides=parse_overrides(kv or []) or None)
+    return Gguf(name, model, n_ctx, Evaluator(model, n_ctx, n_ubatch=n_ubatch) if method.batch else None)

@@ -11,8 +11,14 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{name = "Jeff Ciesielski", email = "jeff@runmushroom.com"}]
 requires-python = ">=3.10"
-# llama-cpp-python needs a CUDA build for GPU use; see the README.
-dependencies = ["llama-cpp-python>=0.3.35", "numpy", "jinja2"]
+dependencies = ["numpy", "jinja2"]
+
+# The llama.cpp backend needs llama-cpp-python, and a CUDA build of it to use a GPU
+# (see the README); importing it at all needs libcuda, which is why it is an extra
+# rather than a dependency. The vLLM backend reaches its engine over HTTP, so it
+# needs nothing beyond the two above and has no extra of its own.
+[project.optional-dependencies]
+llamacpp = ["llama-cpp-python>=0.3.35"]
 
 [project.scripts]
 lichen-server = "lichen.server:main"
