@@ -25,6 +25,8 @@ Differences from TypeSafe:
 GET /health answers 200 with the loaded model's name once the model is loaded.
 """
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json
@@ -32,9 +34,12 @@ import pathlib
 import sys
 import time
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
-from llama_cpp import Llama
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotation only -- importing llama_cpp needs libcuda,
+    from llama_cpp import Llama  # which a vLLM-only install does not have
 
 from .method import LABELS, Method, answer, load, method_arguments, method_from, parse_overrides, positive
 from .runtime import Evaluator
@@ -106,11 +111,10 @@ def trace_line(state, question: dict, a: dict) -> str:
                        "type": question["type"], "answer": served, "readings": a["readings"]})
 
 
-def respond(model: Llama, name: str, method: Method, evaluator: Evaluator | None, request: Request,
-            trace=None) -> dict:
+def respond(answer_fn, name: str, request: Request, trace=None) -> dict:
     answers, input_tokens = {}, 0
     for qid, question in request.questions.items():
-        a = answer(model, {"state": request.state, "question": question}, method, name, evaluator)
+        a = answer_fn({"state": request.state, "question": question})
         if trace:
             print(trace_line(request.state, question, a), file=trace, flush=True)
         input_tokens += a.pop("prompt_tokens")
@@ -120,8 +124,7 @@ def respond(model: Llama, name: str, method: Method, evaluator: Evaluator | None
     return {"model": name, "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 0}}
 
 
-def handler(model: Llama, name: str, method: Method, evaluator: Evaluator | None,
-            trace=None) -> type[BaseHTTPRequestHandler]:
+def handler(answer_fn, name: str, trace=None) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         timeout = 30  # seconds a client may take to send its request
 
@@ -153,7 +156,7 @@ def handler(model: Llama, name: str, method: Method, evaluator: Evaluator | None
                 return
             raw = self.rfile.read(length)
             try:
-                reply = respond(model, name, method, evaluator, parse_request(raw), trace)
+                reply = respond(answer_fn, name, parse_request(raw), trace)
             except (BadRequest, ContextOverflow) as exc:
                 self._send(422, {"detail": str(exc)})
                 return
@@ -179,16 +182,42 @@ def main() -> None:
     ap.add_argument("--n-ctx", type=positive, default=32768)
     ap.add_argument("--no-guard", action="store_true",
                     help="leave out the sentence that tells the model the state is data")
+    ap.add_argument("--vllm-endpoint", metavar="URL",
+                    help="serve from a vLLM OpenAI-compatible endpoint instead of a local GGUF. "
+                         "--model is then only a name unless --vllm-model is given.")
+    ap.add_argument("--vllm-model", metavar="NAME", help="served-model-name on that vLLM")
+    ap.add_argument("--vllm-workers", type=positive, default=8,
+                    help="variants asked concurrently with --vllm-endpoint")
+    ap.add_argument("--top-logprobs", type=positive, default=64,
+                    help="logprobs requested per position; must be >= options x fibers and "
+                         "<= the endpoint's --max-logprobs")
     ap.add_argument("--trace", metavar="PATH",
                     help="append each question's separate readings (rotations or fiber blocks) to PATH as JSON lines")
     method_arguments(ap)
     args = ap.parse_args()
-    name = pathlib.Path(args.model).stem
+    # With --vllm-endpoint, --model is a served-model-name rather than a path, and .stem would
+    # mangle it -- Path("qwen3.8-27b-fp8").stem is "qwen3", which the endpoint then rejects.
+    name = args.model if args.vllm_endpoint else pathlib.Path(args.model).stem
     method = method_from(args, guard=not args.no_guard)
-    model, evaluator = load(args.model, args.n_ctx, method, args.n_ubatch, parse_overrides(args.kv))
-    print(f"serving {name} on {args.host}:{args.port}, n_ctx {args.n_ctx}, {method}", file=sys.stderr, flush=True)
+    if args.vllm_endpoint:
+        # The same method, logits fetched over HTTP. See lichen/vllm.py for why log-probabilities
+        # stand in for logits here, and for the --max-logprobs the endpoint needs.
+        from . import method as method_module
+        from .vllm import Jev, Vllm
+        backend = Vllm(args.vllm_endpoint, args.vllm_model or args.model, args.top_logprobs)
+        answer_fn = Jev(method_module, backend, method, args.vllm_workers).answer
+        where = f"vLLM {args.vllm_model or name} at {args.vllm_endpoint}"
+        server = ThreadingHTTPServer      # vLLM batches; serve requests concurrently
+    else:
+        model, evaluator = load(args.model, args.n_ctx, method, args.n_ubatch,
+                                parse_overrides(args.kv))
+        answer_fn = lambda case: answer(model, case, method, name, evaluator)  # noqa: E731
+        where = f"n_ctx {args.n_ctx}"
+        server = HTTPServer
+    print(f"serving {name} on {args.host}:{args.port}, {where}, {method}",
+          file=sys.stderr, flush=True)
     trace = open(args.trace, "a", encoding="utf-8") if args.trace else None
-    HTTPServer((args.host, args.port), handler(model, name, method, evaluator, trace)).serve_forever()
+    server((args.host, args.port), handler(answer_fn, name, trace)).serve_forever()
 
 
 if __name__ == "__main__":

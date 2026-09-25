@@ -55,6 +55,8 @@ fiber_map, shrink and temperature 1.25. The library's own defaults leave them
 all off.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import string
@@ -62,7 +64,10 @@ import time
 from dataclasses import dataclass
 
 import numpy
-from llama_cpp import Llama
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotation only -- importing llama_cpp needs libcuda,
+    from llama_cpp import Llama  # which a vLLM-only install does not have
 
 from .runtime import ContextOverflow, Evaluator, chat_prompt, label_probabilities, last_logits
 
@@ -419,6 +424,7 @@ def load(gguf: str, n_ctx: int, method: Method, n_ubatch: int = 1024,
     With --batch the Llama object only tokenizes and renders, so its own
     context is kept small and the Evaluator holds the KV cache.
     """
+    from llama_cpp import Llama  # lazy: only this path needs the library
     if method.embedding:
         from . import embed
         return embed.load(gguf), None

@@ -6,14 +6,18 @@ softmax over the first token of each answer label. The Evaluator does this for
 several prompts at once, evaluating the prefix they share only once.
 """
 
+from __future__ import annotations
+
 import functools
 
-import llama_cpp
 import numpy
 from jinja2 import nodes
 from jinja2.ext import Extension
 from jinja2.sandbox import ImmutableSandboxedEnvironment
-from llama_cpp import Llama
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotation only -- importing llama_cpp needs libcuda,
+    from llama_cpp import Llama  # which a vLLM-only install does not have
 
 
 def _raise_exception(message: str):
@@ -64,6 +68,7 @@ class ContextOverflow(ValueError):
 
 
 def last_logits(model: Llama, prompt: str) -> numpy.ndarray:
+    import llama_cpp  # lazy: only this path needs the library
     """Evaluate `prompt` from an empty context and return the next-token logits."""
     tokens = model.tokenize(prompt.encode(), add_bos=False, special=True)
     if len(tokens) > model.n_ctx():
@@ -103,6 +108,7 @@ class Evaluator:
     """
 
     def __init__(self, model: Llama, n_ctx: int = 8192, n_seq: int = 8, n_ubatch: int = 1024):
+        import llama_cpp  # lazy, as in last_logits
         params = llama_cpp.llama_context_default_params()
         params.n_ctx = n_ctx
         params.n_batch = n_ctx
