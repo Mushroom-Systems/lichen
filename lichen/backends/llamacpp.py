@@ -117,11 +117,13 @@ def last_logits(model: Llama, prompt: str) -> numpy.ndarray:
     model.reset()
     model.eval(tokens)
     # Without logits_all, Llama.eval leaves model.scores empty; llama.cpp still holds
-    # the logits of the last position, so read them from the context.
-    logits = numpy.ctypeslib.as_array(
+    # the logits of the last position, so read them from the context. The copy is
+    # load-bearing, as it is in Evaluator.logits: as_array gives a view on llama.cpp's
+    # own buffer, which the next eval overwrites, so two of these otherwise read the
+    # same numbers -- which is what made --runoff without --batch split 50/50.
+    return numpy.ctypeslib.as_array(
         llama_cpp.llama_get_logits_ith(model.ctx, -1), shape=(model.n_vocab(),)
-    )
-    return logits
+    ).copy()
 
 
 def _common_prefix(a: list[int], b: list[int]) -> int:
