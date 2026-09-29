@@ -26,10 +26,25 @@ them, so the request pins the penalties rather than inherit the server's default
 
 The server needs --max-logprobs >= (options x fibers), at most 62; its default of 20 is too low
 for a wide choice. `_probs` still refuses a reply that lacks a label, which would otherwise read
-as probability zero.
+as probability zero. (62 is len(method.LABELS); a raw-mode server fails that check on most wide
+choices, which is how a missing --logprobs-mode shows up.)
+
+vLLM is not deterministic across batches: the same request gave label probabilities up to 0.09
+apart on gemma-4-26B-A4B, enough to move a borderline answer. VLLM_BATCH_INVARIANT=1 in the
+server's environment made two full JevBench runs agree on all 231 items, for ~23% latency.
+A launch that serves this backend reproducibly:
+
+    VLLM_BATCH_INVARIANT=1 vllm serve MODEL --enable-prefix-caching \\
+      --logprobs-mode processed_logprobs --max-logprobs 64 --max-model-len 32768
+
+`usage.input_tokens` is the full prompt as vLLM counts it. The llama.cpp backend counts only the
+tokens it evaluated after its cached prefix, so the two are not comparable as costs.
 
 Not ported: --recheck, whose second round would want the endpoint's own answer written back,
-and --embedding. Asked for, they raise rather than be ignored. Nothing here needs vLLM
+and --embedding. Asked for, they raise rather than be ignored. Nor are the prompts that
+llamacpp.render builds per model -- Granite Guardian's criteria, Qwen3Guard's plain ChatML, and
+closing a reasoning block a template leaves open (LFM2.5) -- so those models are refused rather
+than read with a prompt they were never given (`check_model`). Nothing here needs vLLM
 installed: the engine is reached over HTTP, and a `pip install lichen` is the whole dependency.
 """
 
@@ -62,6 +77,7 @@ class Endpoint:
         self.thinking = thinking
         self.timeout = timeout
         self._tokens: dict[str, int] = {}
+        self._model_checked = False
 
     def close(self) -> None:
         pass  # the weights are the endpoint's
@@ -74,6 +90,44 @@ class Endpoint:
                 return json.load(r)
         except error.HTTPError as exc:
             raise RuntimeError(f"{path} -> HTTP {exc.code}: {exc.read()[:400].decode(errors='replace')}") from exc
+
+    def _get(self, path: str) -> dict:
+        try:
+            with request.urlopen(f"{self.endpoint}{path}", timeout=self.timeout) as r:
+                return json.load(r)
+        except error.HTTPError as exc:
+            raise RuntimeError(f"{path} -> HTTP {exc.code}: {exc.read()[:400].decode(errors='replace')}") from exc
+
+    def check_model(self, messages: list[dict]) -> None:
+        """Refuse a model whose lichen prompt only the llama.cpp backend knows how to build.
+
+        llamacpp.render gives Granite Guardian and Qwen3Guard their own prompts, and closes a
+        reasoning block the template leaves open. Here the server's template renders the plain
+        messages, so those models would be read at the wrong place or with the wrong question --
+        and a distribution comes back either way. `--model` is a served name, which need not say
+        what it serves, so the checkpoint path the server reports is checked too; and the open
+        block is found in the rendered prompt itself, whatever the model is called. Once per
+        endpoint: the answer cannot change while it is up.
+        """
+        if self._model_checked:
+            return
+        served = self._get("/v1/models").get("data", [])
+        root = next((m.get("root") or "" for m in served if m.get("id") == self.served), "")
+        names = f"{self.name} {self.served} {root}".lower()
+        for family in ("granite-guardian", "qwen3guard"):
+            if family in names:
+                raise RuntimeError(f"{family} needs a prompt only the llama.cpp backend builds; "
+                                   f"serve it from a GGUF rather than --vllm-endpoint")
+        strs = self._post("/tokenize", {
+            "model": self.served, "messages": messages, "add_generation_prompt": True,
+            "return_token_strs": True, "chat_template_kwargs": {"enable_thinking": self.thinking},
+        }).get("token_strs") or []
+        if not self.thinking and strs and strs[-1] == "<think>":
+            raise RuntimeError(
+                "this model's chat template opens a reasoning block with thinking off, so the "
+                "next token is reasoning, not a label. The llama.cpp backend closes it; this one "
+                "does not -- serve it from a GGUF rather than --vllm-endpoint")
+        self._model_checked = True
 
     def check_labels(self, labels: list[str]) -> None:
         """lichen's invariant: every label is exactly one token, and no two share one.
@@ -99,6 +153,7 @@ class Endpoint:
         vLLM's scheduler batch them, rather than walking them one at a time.
         """
         rendered = [chat_messages(v, method) for v in asked]
+        self.check_model(rendered[0][0])
 
         def one(r):
             return self._probs(r[0], r[1], method.temperature)
