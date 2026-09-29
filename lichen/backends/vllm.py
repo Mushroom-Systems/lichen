@@ -15,15 +15,17 @@ Two reasons it is worth having:
   * vLLM cannot read GGUF at all (its V1 engine lists GGUF as removed), so this is the only way
     to put the same question to an FP8 or AWQ checkpoint.
 
-vLLM returns log-probabilities where a softmax over the labels wants logits. They are
-interchangeable here: log_softmax differs from the logits by a constant that is the same for
-every token at this position, and dividing by the temperature divides that constant too, so it
-cancels in the softmax over the label subset. What matters is that they are RAW -- vLLM's
---logprobs-mode must be raw_logprobs (the default) or raw_logits, never a `processed` mode.
+Each request names its label tokens in `allowed_token_ids`, and the endpoint must run with
+--logprobs-mode processed_logprobs. The log-probabilities then come after the mask, so they are
+the softmax over the label tokens alone, and the top-N list holds every label and nothing else.
+With a raw mode the top-N is taken over the whole vocabulary, and a confident model ranks its
+unlikely labels below other tokens: on gemma-4-26B-A4B, 3 of 6 labels were missing from the top
+64. The greedy request applies no temperature, so the processed values are the masked logits
+less one constant, which cancels in the softmax over the labels.
 
-The server needs --max-logprobs >= (options x fibers); its default of 20 is too low for a wide
-choice, and a label missing from the top-N would otherwise read as probability zero, so
-`_probs` checks and refuses.
+The server needs --max-logprobs >= (options x fibers), at most 62; its default of 20 is too low
+for a wide choice. `_probs` still refuses a reply that lacks a label, which would otherwise read
+as probability zero.
 
 Not ported: --recheck, whose second round would want the endpoint's own answer written back,
 and --embedding. Asked for, they raise rather than be ignored. Nothing here needs vLLM
@@ -115,10 +117,14 @@ class Endpoint:
         several requests share.
         """
         self.check_labels(labels)
+        ids = [self._tokens[l] for l in labels]
+        if len(ids) > self.top_logprobs:
+            raise ValueError(f"{len(ids)} labels; --top-logprobs is {self.top_logprobs}")
         body = {
             "model": self.served, "messages": messages,
             "max_tokens": 1, "temperature": 0.0,
-            "logprobs": True, "top_logprobs": self.top_logprobs,
+            "logprobs": True, "top_logprobs": len(ids),
+            "allowed_token_ids": ids, "return_tokens_as_token_ids": True,
             # Lichen's chat_prompt renders with enable_thinking=False. It is load-bearing: with
             # thinking on, the first token is <think> and every decision is garbage -- silently,
             # since a distribution still comes back. A chat template defaults it to true, so this
@@ -130,12 +136,12 @@ class Endpoint:
         content = (d["choices"][0].get("logprobs") or {}).get("content") or []
         if not content:
             raise RuntimeError("no logprobs in reply; is the server built with logprobs support?")
-        top = {e["token"]: e["logprob"] for e in content[0].get("top_logprobs", [])}
-        missing = [l for l in labels if l not in top]
+        # With return_tokens_as_token_ids each token reads "token_id:<id>".
+        top = {int(e["token"].rpartition(":")[2]): e["logprob"] for e in content[0].get("top_logprobs", [])}
+        missing = [l for l, i in zip(labels, ids) if i not in top]
         if missing:
             raise RuntimeError(
-                f"{len(missing)} of {len(labels)} labels absent from the top {self.top_logprobs} "
-                f"({missing[:6]}). Raise the server's --max-logprobs; a missing label would "
-                f"otherwise read as probability zero.")
-        x = numpy.asarray([top[l] for l in labels], dtype=numpy.float64) / temperature
+                f"{len(missing)} of {len(labels)} labels absent from the reply ({missing[:6]}). "
+                f"Is the endpoint running with --logprobs-mode processed_logprobs?")
+        x = numpy.asarray([top[i] for i in ids], dtype=numpy.float64) / temperature
         return numpy.exp(x - numpy.logaddexp.reduce(x)), tokens
