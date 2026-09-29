@@ -25,3 +25,6 @@ lichen-server = "lichen.server:main"
 
 [tool.setuptools.packages.find]
 include = ["lichen*"]
+
+[dependency-groups]
+test = ["pytest"]
