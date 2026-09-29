@@ -17,7 +17,7 @@ Queries longer than EmbeddingGemma's 2048 tokens are cut at the end.
 import numpy
 from llama_cpp import Llama
 
-from .method import state_part, text
+from ..method import state_part, text
 
 TEMPERATURE = 0.05
 QUERY = "task: classification | query: "

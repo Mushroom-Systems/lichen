@@ -15,25 +15,23 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from lichen.method import Method, answer, load, method_arguments, method_from, parse_overrides  # noqa: E402
+from lichen.backends import llamacpp  # noqa: E402
+from lichen.method import Method, answer, method_arguments, method_from  # noqa: E402
 
 
 def main(case_set: str, out: str, paths: list[str], method: Method, n_ubatch: int = 1024,
-         overrides: dict | None = None) -> None:
+         kv: list[str] | None = None) -> None:
     cases = importlib.import_module(case_set).CASES
     path = pathlib.Path(out)
     results = json.loads(path.read_text()) if path.exists() else {}
     for gguf in paths:
-        name = pathlib.Path(gguf).stem
-        model, evaluator = load(gguf, 32768, method, n_ubatch, overrides)
-        answer(model, cases[0], method, name, evaluator)  # warm-up
-        results[name] = {case["id"]: answer(model, case, method, name, evaluator) for case in cases}
-        print(name, "done", flush=True)
+        model = llamacpp.backend(gguf, 32768, method, n_ubatch, kv)
+        answer(model, cases[0], method)  # warm-up
+        results[model.name] = {case["id"]: answer(model, case, method) for case in cases}
+        print(model.name, "done", flush=True)
         path.write_text(json.dumps(results, indent=1))
-        if evaluator:
-            evaluator.close()
         model.close()
-        del model, evaluator
+        del model
 
 
 if __name__ == "__main__":
@@ -44,4 +42,4 @@ if __name__ == "__main__":
     ap.add_argument("out")
     ap.add_argument("models", nargs="+")
     args = ap.parse_args()
-    main(args.cases, args.out, args.models, method_from(args, args.guard), args.n_ubatch, parse_overrides(args.kv))
+    main(args.cases, args.out, args.models, method_from(args, args.guard), args.n_ubatch, args.kv)

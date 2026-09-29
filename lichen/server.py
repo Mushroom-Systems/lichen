@@ -1,7 +1,10 @@
-"""A local stand-in for TypeSafe's System One endpoint, backed by one GGUF model.
+"""A local stand-in for TypeSafe's System One endpoint, backed by one model.
 
     python -m lichen.server --model MODEL.gguf [--repeat 2 --permute --batch --fibers 2 --fiber-map
         --shrink --temperature 1.25] [--n-ctx N] [...]
+
+A GGUF on this machine by default, or a vLLM endpoint with --vllm-endpoint; the
+method is the same either way (lichen/backends/).
 
 `--help` lists every option.
 
@@ -20,7 +23,8 @@ Differences from TypeSafe:
   change how a question is put and how many passes it takes; see
   lichen/method.py.
 - Requests are served one at a time, because a llama.cpp context is not
-  safe to share between threads.
+  safe to share between threads. With --vllm-endpoint the engine batches for
+  itself, so they are served concurrently.
 
 GET /health answers 200 with the loaded model's name once the model is loaded.
 """
@@ -28,17 +32,13 @@ GET /health answers 200 with the loaded model's name once the model is loaded.
 import argparse
 import hashlib
 import json
-import pathlib
 import sys
 import time
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
-from llama_cpp import Llama
-
-from .method import LABELS, Method, answer, load, method_arguments, method_from, parse_overrides, positive
-from .runtime import Evaluator
-from .runtime import ContextOverflow
+from .backends import backend_from
+from .method import ContextOverflow, LABELS, Method, answer, method_arguments, method_from, positive
 
 MAX_OPTIONS = len(LABELS)
 MAX_LEVELS = 10
@@ -106,22 +106,21 @@ def trace_line(state, question: dict, a: dict) -> str:
                        "type": question["type"], "answer": served, "readings": a["readings"]})
 
 
-def respond(model: Llama, name: str, method: Method, evaluator: Evaluator | None, request: Request,
-            trace=None) -> dict:
+def respond(backend, method: Method, request: Request, trace=None) -> dict:
     answers, input_tokens = {}, 0
     for qid, question in request.questions.items():
-        a = answer(model, {"state": request.state, "question": question}, method, name, evaluator)
+        a = answer(backend, {"state": request.state, "question": question}, method)
         if trace:
             print(trace_line(request.state, question, a), file=trace, flush=True)
         input_tokens += a.pop("prompt_tokens")
         a.pop("latency_ms")
         a.pop("readings")
         answers[qid] = a
-    return {"model": name, "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 0}}
+    return {"model": backend.name, "answers": answers,
+            "usage": {"input_tokens": input_tokens, "output_tokens": 0}}
 
 
-def handler(model: Llama, name: str, method: Method, evaluator: Evaluator | None,
-            trace=None) -> type[BaseHTTPRequestHandler]:
+def handler(backend, method: Method, trace=None) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         timeout = 30  # seconds a client may take to send its request
 
@@ -135,7 +134,7 @@ def handler(model: Llama, name: str, method: Method, evaluator: Evaluator | None
 
         def do_GET(self) -> None:
             if self.path == "/health":
-                self._send(200, {"model": name})
+                self._send(200, {"model": backend.name})
             else:
                 self._send(404, {"detail": f"no such path: {self.path}"})
 
@@ -153,7 +152,7 @@ def handler(model: Llama, name: str, method: Method, evaluator: Evaluator | None
                 return
             raw = self.rfile.read(length)
             try:
-                reply = respond(model, name, method, evaluator, parse_request(raw), trace)
+                reply = respond(backend, method, parse_request(raw), trace)
             except (BadRequest, ContextOverflow) as exc:
                 self._send(422, {"detail": str(exc)})
                 return
@@ -179,16 +178,26 @@ def main() -> None:
     ap.add_argument("--n-ctx", type=positive, default=32768)
     ap.add_argument("--no-guard", action="store_true",
                     help="leave out the sentence that tells the model the state is data")
+    ap.add_argument("--vllm-endpoint", metavar="URL",
+                    help="serve from a vLLM OpenAI-compatible endpoint instead of a local GGUF. "
+                         "--model is then only a name unless --vllm-model is given.")
+    ap.add_argument("--vllm-model", metavar="NAME", help="served-model-name on that vLLM")
+    ap.add_argument("--vllm-workers", type=positive, default=8,
+                    help="variants asked concurrently with --vllm-endpoint")
+    ap.add_argument("--top-logprobs", type=positive, default=64,
+                    help="the most labels one prompt may be read over (vLLM); must be >= options x "
+                         "fibers and <= the endpoint's --max-logprobs")
     ap.add_argument("--trace", metavar="PATH",
                     help="append each question's separate readings (rotations or fiber blocks) to PATH as JSON lines")
     method_arguments(ap)
     args = ap.parse_args()
-    name = pathlib.Path(args.model).stem
     method = method_from(args, guard=not args.no_guard)
-    model, evaluator = load(args.model, args.n_ctx, method, args.n_ubatch, parse_overrides(args.kv))
-    print(f"serving {name} on {args.host}:{args.port}, n_ctx {args.n_ctx}, {method}", file=sys.stderr, flush=True)
+    backend = backend_from(args, method)
+    print(f"serving {backend.name} on {args.host}:{args.port}, {backend.where}, {method}",
+          file=sys.stderr, flush=True)
     trace = open(args.trace, "a", encoding="utf-8") if args.trace else None
-    HTTPServer((args.host, args.port), handler(model, name, method, evaluator, trace)).serve_forever()
+    server = ThreadingHTTPServer if backend.threaded else HTTPServer
+    server((args.host, args.port), handler(backend, method, trace)).serve_forever()
 
 
 if __name__ == "__main__":

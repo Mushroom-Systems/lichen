@@ -187,6 +187,44 @@ docker run --rm --gpus all -p 8765:8765 -v "$PWD/models:/models:ro" \
 A temperature suits one model and one kind of question, so a model other than
 these two needs its own; see `docs/RESULTS.md` for how the fit was done.
 
+## Serving from vLLM
+
+`--vllm-endpoint URL` reads the same method from a vLLM server instead of a
+local GGUF, so checkpoints only vLLM serves (FP8, AWQ, NVFP4) can be used, and
+concurrent requests are batched by vLLM. It needs no GPU or llama.cpp on the
+machine running Lichen: `pip install .` is enough, where a GGUF needs
+`pip install '.[llamacpp]'`.
+
+Lichen restricts each read to the label tokens with `allowed_token_ids`, so
+vLLM must report log-probabilities after that restriction:
+
+```
+VLLM_BATCH_INVARIANT=1 vllm serve nvidia/Gemma-4-26B-A4B-NVFP4 --max-model-len 16384 \
+    --enable-prefix-caching --logprobs-mode processed_logprobs --max-logprobs 64
+
+python -m lichen.server --vllm-endpoint http://localhost:8000 \
+    --model nvidia/Gemma-4-26B-A4B-NVFP4 --repeat 2 --permute --fibers 2 --fiber-map \
+    --shrink --temperature 1.25
+```
+
+- `--model` is the name vLLM serves the model under. `--vllm-model NAME` sends
+  that name to vLLM instead, and `--model` is then only the name replies carry.
+- Without `--logprobs-mode processed_logprobs` most choices fail with an error
+  naming it. `--max-logprobs` must be at least options × fibers.
+- Without `VLLM_BATCH_INVARIANT=1` the same request can give probabilities up to
+  0.09 apart, enough to change a close answer; with it, two JevBench runs agreed
+  on all 231 items, at 23% more latency. Some models cannot run with it (on vLLM
+  0.29, Qwen3.8's linear-attention layers); `--max-num-seqs 1` removes most of the
+  variation instead.
+- `--batch` does nothing here, since vLLM caches the shared prefix itself.
+  `--recheck` and `--embedding` are not available, and neither are the models
+  whose prompts only the llama.cpp backend builds (Granite Guardian, Qwen3Guard,
+  and chat templates that leave a reasoning block open); asking for them is an
+  error.
+- `usage.input_tokens` counts the whole prompt. With a GGUF it counts only the
+  tokens after the cached prefix, so the two are not comparable.
+- A prompt longer than vLLM's context returns 500 rather than 422.
+
 ## Options
 
 Arguments after `lichen` in `docker run` are added to the image's defaults, and
@@ -231,8 +269,8 @@ JevBench's `results/v1.2/jevbench-v1.2-per-task.json`.
 
 ## Limits
 
-The server answers one request at a time, and the questions in a request one
-after another. A choice takes 2 to 62 options, one label each (A-Z, a-z,
+With a GGUF the server answers one request at a time; with `--vllm-endpoint`,
+concurrently. Either way the questions in a request are answered one after another. A choice takes 2 to 62 options, one label each (A-Z, a-z,
 0-9), and a score 2 to 10 levels, one digit each. Jev does not publish how it computes a score's
 confidence, so Lichen uses the choice formula for both. Every measurement comes
 from one GPU model.

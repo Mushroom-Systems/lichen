@@ -169,7 +169,7 @@ each choice once per rotation of its options; the gemma rows at a 16k context
 and the rest at 32k. Among those, Qwen3.6-35B-A3B ran without `--batch` (see
 "Open items"), gemma-4-E4B added `--compact-json --rotate-last`, and
 EmbeddingGemma answers by cosine similarity between the question and each
-answer (`lichen/embed.py`) and has no prompt method.
+answer (`lichen/backends/embed.py`) and has no prompt method.
 
 | Lichen run | Input tokens per decision | p95 s | Hard ECE | Fidelity | Calibration score |
 |---|---|---|---|---|---|
