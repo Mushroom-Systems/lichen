@@ -31,11 +31,21 @@ choices, which is how a missing --logprobs-mode shows up.)
 
 vLLM is not deterministic across batches: the same request gave label probabilities up to 0.09
 apart on gemma-4-26B-A4B, enough to move a borderline answer. VLLM_BATCH_INVARIANT=1 in the
-server's environment made two full JevBench runs agree on all 231 items, for ~23% latency.
+server's environment made two full JevBench runs agree on all 231 items, for ~23% latency. That
+holds within one running server: after a restart with the same launch, probabilities moved by
+up to 0.14 on gemma-4-26B-A4B NVFP4 (vLLM 0.30).
 A launch that serves this backend reproducibly:
 
     VLLM_BATCH_INVARIANT=1 vllm serve MODEL --enable-prefix-caching \\
       --logprobs-mode processed_logprobs --max-logprobs 64 --max-model-len 32768
+
+A case's `images` are base64 data URLs, never links, so vLLM fetches nothing. They reach it as
+image_url content parts, all of them in each copy of the state,
+so the endpoint must allow images x --repeat per prompt with --limit-mm-per-prompt. With a limit
+of 0 vLLM does not load the vision encoder, which on gemma-4-26B-A4B is 1.08 GiB taken from the
+KV cache. There one image is 262 prompt tokens, which the n_ctx check counts, since /tokenize
+does. With VLLM_BATCH_INVARIANT=1 image answers repeat bit for bit when requests come one at a
+time; with 8 at once, one answer in 84 or 125 moved, with the same top answer.
 
 `usage.input_tokens` is the full prompt as vLLM counts it. The llama.cpp backend counts only the
 tokens it evaluated after its cached prefix, so the two are not comparable as costs.
@@ -54,7 +64,7 @@ from urllib import error, request
 
 import numpy
 
-from ..method import Method, chat_messages
+from ..method import ContextOverflow, Method, chat_messages
 
 
 class Endpoint:
@@ -64,15 +74,21 @@ class Endpoint:
 
     def __init__(self, endpoint: str, model: str, method: Method, top_logprobs: int = 64,
                  workers: int = 8, served: str | None = None, thinking: bool = False,
-                 timeout: float = 600.0):
+                 timeout: float = 600.0, n_ctx: int | None = None, priority: int = 0):
         for unsupported in ("recheck", "embedding"):
             if getattr(method, unsupported):
                 raise SystemExit(f"--{unsupported} is not ported to the vLLM backend")
         self.endpoint = endpoint.rstrip("/")
         self.name = model           # the name a reply carries
         self.served = served or model  # the name this endpoint knows it by
-        self.where = f"vLLM {self.served} at {self.endpoint}"
+        self.where = f"vLLM {self.served} at {self.endpoint}, n_ctx {n_ctx}, priority {priority}"
         self.top_logprobs = top_logprobs
+        # The endpoint's --max-model-len also bounds its chat requests, so a judgment gets its
+        # own, smaller limit here, checked against the prompt as the endpoint tokenizes it.
+        self.n_ctx = n_ctx
+        # Lower runs sooner. Anything but 0 needs the endpoint's --scheduling-policy priority,
+        # so 0 is left out of the request.
+        self.priority = priority
         self.workers = workers
         self.thinking = thinking
         self.timeout = timeout
@@ -194,6 +210,14 @@ class Endpoint:
             # override per request is what makes the method work at all.
             "chat_template_kwargs": {"enable_thinking": self.thinking},
         }
+        if self.n_ctx:
+            need = self._post("/tokenize", {"model": self.served, "messages": messages,
+                                            "add_generation_prompt": True,
+                                            "chat_template_kwargs": body["chat_template_kwargs"]})["count"]
+            if need > self.n_ctx:
+                raise ContextOverflow(f"prompt of {need} tokens exceeds the context of {self.n_ctx}")
+        if self.priority:
+            body["priority"] = self.priority
         d = self._post("/v1/chat/completions", body)
         tokens = int((d.get("usage") or {}).get("prompt_tokens") or 0)
         content = (d["choices"][0].get("logprobs") or {}).get("content") or []

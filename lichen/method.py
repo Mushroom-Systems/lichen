@@ -116,9 +116,12 @@ def state_part(state, compact: bool = False) -> str:
     return f"State:\n{text(state, compact)}"
 
 
+IMAGES = object()  # in user_message's pieces, the place where a copy of the state shows its images
+
+
 def user_message(state, question: dict, repeat: int = 1, options_once: bool = False,
                  question_first: bool = False, compact: bool = False,
-                 earlier: dict | None = None) -> tuple[str, list[str], list[str]]:
+                 earlier: dict | None = None, images: tuple[str, ...] = ()) -> tuple[str | list[dict], list[str], list[str]]:
     """The prompt body, the answer labels the model can emit, and the keys they stand for.
 
     The state and the question appear `repeat` times; the answers too, unless
@@ -127,18 +130,42 @@ def user_message(state, question: dict, repeat: int = 1, options_once: bool = Fa
     `earlier`, when given, is the question as the copies before the last one
     show it (its own option order), and `question` is shown in the last copy
     only. The labels to read are the last copy's.
-    """
-    def block(q: dict) -> str:
-        head, tail, _, _ = question_split(q, compact)
-        core = f"{head}\n\n{state_part(state, compact)}" if question_first else f"{state_part(state, compact)}\n\n{head}"
-        return f"{core}\n\n{tail}"
 
-    head, tail, labels, keys = question_split(question, compact)
+    `images` are images, as data URLs, that belong to the state. Each copy of the state
+    shows all of them, after "State:" and before the state's text, and the body
+    is then a list of OpenAI content parts. Without images it is one string.
+    """
+    def core(q: dict) -> tuple[list, str]:
+        head, tail, _, _ = question_split(q, compact)
+        shown = ["State:\n", IMAGES, text(state, compact)]
+        return ([head, "\n\n", *shown] if question_first else [*shown, "\n\n", head]), tail
+
+    def block(q: dict) -> list:
+        pieces, tail = core(q)
+        return pieces + ["\n\n", tail]
+
+    _, tail, labels, keys = question_split(question, compact)
     if options_once:
-        core = f"{head}\n\n{state_part(state, compact)}" if question_first else f"{state_part(state, compact)}\n\n{head}"
-        return "\n\n".join([core] * repeat + [tail]), labels, keys
-    copies = [block(earlier or question)] * (repeat - 1) + [block(question)]
-    return "\n\n".join(copies), labels, keys
+        blocks = [core(question)[0]] * repeat + [[tail]]
+    else:
+        blocks = [block(earlier or question)] * (repeat - 1) + [block(question)]
+    pieces = [p for i, b in enumerate(blocks) for p in (["\n\n"] if i else []) + b]
+    return content(pieces, images), labels, keys
+
+
+def content(pieces: list, images: tuple[str, ...]) -> str | list[dict]:
+    """A message's content from text pieces and IMAGES places: a string, or content parts."""
+    if not images:
+        return "".join(p for p in pieces if p is not IMAGES)
+    parts: list[dict] = []
+    for p in pieces:
+        if p is IMAGES:
+            parts += [{"type": "image_url", "image_url": {"url": url}} for url in images]
+        elif p and parts and parts[-1]["type"] == "text":
+            parts[-1]["text"] += p
+        elif p:
+            parts.append({"type": "text", "text": p})
+    return parts
 
 
 def question_part(question: dict, compact: bool = False) -> tuple[str, list[str], list[str]]:
@@ -190,11 +217,13 @@ def chat_messages(case: dict, method: Method,
 
     `previous` is the label of a first answer to write back for a recheck. A
     backend either renders these with the model's own template (llama.cpp) or
-    hands them to a server that does (vLLM).
+    hands them to a server that does (vLLM). A case's `images` go in the user
+    message (see `user_message`); only the vLLM backend reads them.
     """
     earlier = case.get("earlier_question") if method.rotate_last else None
     body, labels, keys = user_message(case["state"], case["question"], method.repeat, method.options_once,
-                                      method.question_first, method.compact_json, earlier)
+                                      method.question_first, method.compact_json, earlier,
+                                      tuple(case.get("images", ())))
     messages = [{"role": "system", "content": method.system}, {"role": "user", "content": body}]
     if previous is not None:
         messages += [{"role": "assistant", "content": previous}, {"role": "user", "content": RECHECK}]

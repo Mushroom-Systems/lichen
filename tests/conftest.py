@@ -36,7 +36,7 @@ class Stub:
         if path == "/tokenize":
             if "messages" in body:
                 return {"tokens": list(range(len(self.rendered_tail))),
-                        "token_strs": self.rendered_tail}
+                        "token_strs": self.rendered_tail, "count": self.prompt_tokens}
             return {"tokens": self.tokenize(body["prompt"])}
         if path == "/v1/chat/completions":
             ids = body["allowed_token_ids"]

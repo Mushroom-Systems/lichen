@@ -80,6 +80,8 @@ def render(name: str, model: Llama, case: dict, method: Method,
 
     `previous` is the label of a first answer to write back for a recheck.
     """
+    if case.get("images"):
+        raise ValueError("the llama.cpp backend reads no images; serve images from --vllm-endpoint")
     if "granite-guardian" in name:
         # Granite Guardian judges the user message against `custom_criteria` and
         # answers "<score> yes </score>". The question goes in the criteria, the

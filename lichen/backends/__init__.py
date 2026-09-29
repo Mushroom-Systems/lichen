@@ -25,7 +25,7 @@ def backend_from(args, method):
     if args.vllm_endpoint:
         from .vllm import Endpoint
         return Endpoint(args.vllm_endpoint, args.model, method, args.top_logprobs,
-                        args.vllm_workers, args.vllm_model)
+                        args.vllm_workers, args.vllm_model, n_ctx=args.n_ctx, priority=args.vllm_priority)
     try:
         from .llamacpp import backend
     except ModuleNotFoundError as exc:  # llama-cpp-python is the `llamacpp` extra
