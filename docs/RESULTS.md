@@ -5,9 +5,10 @@ Doom results, the prompt layouts and confidence corrections that were tried,
 the speed tuning, the models measured and what is still open. For how to run
 Lichen, see the README.
 
-All measurements were taken on 2026-09-23 and 2026-09-24 on one RTX 5090
-Laptop GPU (24 GB), with llama-cpp-python 0.3.35 built for CUDA sm_120 by the
-repository's `Dockerfile`. The JevBench runs of the models in the README are
+All measurements were taken on one RTX 5090 Laptop GPU (24 GB): the llama.cpp
+ones on 2026-09-23 and 2026-09-24, with llama-cpp-python 0.3.35 built for CUDA
+sm_120 by the repository's `Dockerfile`, and the vLLM ones on 2026-09-28 and
+2026-09-29 (see "vLLM backend"). The JevBench runs of the models in the README are
 published in `results/jevbench/`, and `bench/jevbench_compare.py` rebuilds the
 JevBench table from them and JevBench's own per-item file. The runs of the
 other layouts, the `--trace` files and the Doom logs are not published.
@@ -139,6 +140,7 @@ The other rows are JevBench's published per-item outcomes on the same items
 |---|---|---|---|---|---|
 | Lichen, gemma-4-26B-A4B QAT Q4_0 | 48/48 | 71/72 | 88/111 | 0.896 | 0.093 |
 | Lichen, gemma-4-26B-A4B QAT Q4_0, rotations | 48/48 | 71/72 | 88/111 | 0.896 | 0.147 |
+| Lichen, gemma-4-26B-A4B NVFP4 on vLLM | 48/48 | 71/72 | 85/111 | 0.883 | 0.056 |
 | gemma-4-26B-A4B QAT Q4_0 alone, no prompt techniques | 48/48 | 71/72 | 83/111 | 0.874 | 0.085 |
 | Lichen, gemma-4-26B-A4B Q4_0 (not QAT), rotations | 48/48 | 71/72 | 85/111 | 0.883 | 0.151 |
 | Lichen, Qwen3.6-35B-A3B | 48/48 | 71/72 | 83/111 | 0.874 | 0.468 |
@@ -383,6 +385,146 @@ hard items. cuBLAS is much slower than llama.cpp's own quantized kernels on
 this GPU. Speculative decoding and multi-token prediction do not apply: Lichen
 generates no tokens.
 
+## vLLM backend
+
+These runs used vLLM 0.30.0 (the `vllm/vllm-openai:v0.30.0` image) on the same
+GPU, serving unsloth's NVFP4 build of gemma-4-26B-A4B with the launch in the
+README's "Serving from vLLM", on 2026-09-28 and 2026-09-29. It is quantized
+from `google/gemma-4-26B-A4B-it` after training, not from the QAT checkpoint the
+GGUF comes from, so the two backends do not run the same weights. That build stores
+the experts and the shared feed-forward layers in NVFP4 and attention in FP8,
+and its weights take 15.24 GiB. NVIDIA's NVFP4 build (experts only, 17.05 GiB)
+scored 208 of 231 at a median of 69 ms, and unsloth's 206 at 53 ms, both with
+`VLLM_BATCH_INVARIANT=1` and the image's configuration; those two runs are not
+published. unsloth's build was kept for its speed and its smaller weights, which
+leave more room for the KV cache.
+
+### JevBench
+
+| Run | Hard | Public accuracy | p50 ms | p95 ms | Hard ECE | Fidelity | Calibration score |
+|---|---|---|---|---|---|---|---|
+| llama.cpp, QAT Q4_0, temperature 1.25 (the image) | 88/111 | 0.896 | 93 | 928 | 0.120 | 0.791 | 77.5 |
+| vLLM, NVFP4, temperature 1.25 | 85/111 | 0.883 | 57 | 431 | 0.177 | 0.625 | 63.6 |
+| vLLM, NVFP4, temperature 2.25 (published) | 85/111 | 0.883 | 56 | 431 | 0.119 | 0.698 | 73.0 |
+
+Both vLLM rows add `--question-first --compact-json` to the image's options.
+The two vLLM runs give the same answer on all 231 items. Paired with the
+llama.cpp run, 9 items are right only there and 6 only on vLLM (exact McNemar
+p = 0.61), and four vLLM configurations tried along the way (state first or
+question first, with and without images allowed) scored 204 to 206. A vLLM
+request takes 0.59 times as long as the same request on llama.cpp at the median
+(quartiles 0.49 to 0.64); the README gives the times by prompt size.
+
+`bench/load.py` sent the 231 requests at 1, 4, 8 and 16 at a time: 8.3, 10.3,
+10.9 and 10.9 requests a second, with a median latency of 54, 144, 252 and
+654 ms. One request already keeps the GPU busy, so batching adds about 30%.
+llama.cpp answers one request at a time; its 231 latencies add up to 56.7 s,
+4.1 requests a second.
+
+With `VLLM_BATCH_INVARIANT=1`, two runs against one running vLLM agree bit for
+bit on every item, text or image, when the requests come one at a time. The
+answers of text requests sent together were not compared. A new start of vLLM
+does not keep them, even with the same launch: over three starts with the
+published settings, the first three hard items' top answers read 0.848, 0.913
+and 0.991; 0.879, 0.924 and 0.910; and 0.953, 0.987 and 0.980. Each start then
+repeated its own values exactly. The runs in this section each come from one
+start, and the two temperatures were compared on the same one. Accuracy moved
+little between starts (204 to 206 of 231), but a calibration measured on one
+start carries this spread too: the four runs at temperature 1.25 gave a hard
+ECE of 0.139 to 0.177.
+
+### Temperature
+
+`bench/fit_temperature.py` answers the 98 cases of `bench/cases.py` and
+`bench/cases_hard.py` at each temperature, with the served options, and scores
+the probability each answer gives the gold one:
+
+| Temperature | NLL | Brier | Right |
+|---|---|---|---|
+| 1.00 | 0.3252 | 0.0676 | 95/98 |
+| 1.25 | 0.2720 | 0.0692 | 95/98 |
+| 1.50 | 0.2406 | 0.0711 | 95/98 |
+| 2.00 | 0.2118 | 0.0758 | 95/98 |
+| **2.25** | **0.2075** | 0.0787 | 95/98 |
+| 2.50 | 0.2077 | 0.0820 | 95/98 |
+| 3.00 | 0.2168 | 0.0899 | 95/98 |
+
+The NLL is lowest at 2.25, and the three wrong answers carry most of it: at
+1.25 the model is as sure of them as the QAT model is at a much lower
+temperature. The fit never saw JevBench, and on JevBench's hard tier 2.25
+lowered the calibration error from 0.177 to 0.119, the QAT model's value, and
+changed no answer. The Brier score, which weighs the 95 right answers more,
+is lowest at 1.0; the published setting follows the NLL, as the QAT fit did.
+Fidelity to the 10 gold distributions stays below the QAT model's (0.698
+against 0.791).
+
+### Images
+
+Allowing images loads the vision encoder: the weights grow from 15.24 to
+16.32 GiB, and at `--gpu-memory-utilization 0.94` the KV cache shrinks from
+4.1 GiB (252,174 tokens) to 3.41 GiB (209,497). An image is 262 prompt tokens
+as vLLM's `/tokenize` counts it, and Lichen shows it in each copy of the state.
+
+`bench/run_images.py` sends one request per image, with the state "The attached
+image." and the task's question, to the served configuration at temperature
+2.25:
+
+| Commons task | Question | Options | Right |
+|---|---|---|---|
+| animal | Which animal is in the image? | cat, dog, horse, cow, bird | 18/18 |
+| vehicle | Which vehicle is in the image? | car, bicycle, train, boat, airplane | 24/24 |
+| food | Which dish is in the image? | pizza, salad, cake, soup | 20/20 |
+| snow | Is there snow in the image? | noul | 16/16 |
+| time | Was this picture taken by day or at night? | day, night | 11/11 |
+| sign | Which road sign is in the image? | stop, one way, speed limit, no entry | 20/20 |
+| chart | What kind of chart is this? | bar, pie, line | 16/16 |
+
+| Drawn task | Right |
+|---|---|
+| colour of a shape (5 colours) | 10/10 |
+| kind of shape (3) | 9/9 |
+| number of dots, 1 to 6 | 10/12 |
+| word on a stamp (3) | 9/9 |
+| trend of a line chart (3) | 9/9 |
+| customer message drawn as a picture: which team (3) | 15/15 |
+| is there a red object (noul) | 10/10 |
+| how full a container is (score, 5 levels) | 10/10 |
+
+The Commons images were found by keyword search on Wikimedia Commons, kept
+only when their license was CC0, public domain or CC BY, and then checked by
+eye; pictures without a clear answer (an empty bowl filed as soup, a sign with
+both one-way and do-not-enter panels, near duplicates) were left out. The
+manifest lists each image's page, author, license and the SHA-256 of the
+960-pixel copy used. The median request took 182 ms (787 tokens), and 167 ms
+for the drawn set (755 tokens).
+
+The two misses are counts, four dots read as five and five as six; at
+temperature 1.25 with no state text, in an earlier in-process run, the same
+images were counted right. Counting is sensitive to the prompt. With the image
+shown once, and "(the image above)" in the second copy of the state, that run
+scored 83 of 84 against 84 with the image in both copies, at 481 tokens against
+745 and about the same latency; the server shows it in both.
+
+Sent one at a time, both sets repeat bit for bit. Sent 8 at a time, one answer
+per set moved (0.88 to 0.93 on a dog photo, 0.51 to 0.70 on a drawn purple
+shape), with the same top answer; at temperature 1.25 the largest move was
+0.012. Batch invariance does not cover images read together, and shrink
+enlarges a small change in how far the two blocks disagree.
+
+At temperature 2.25 the Commons answers have a median confidence of 0.954, and
+at 1.25 of 0.998. Every answer is right, so the higher temperature makes them
+less sure than they need to be; clear photos of a car read 0.64. The
+temperature was fitted on text questions, and this image set is easier than
+they are.
+
+### Chat on the same server
+
+The chat and Lichen share one vLLM, one model and one KV cache. A 120,000-token
+chat prompt took 27.7 s to read; 24 judgments sent during it took 1.1 s at the
+median and 2.3 s at most, against 41 ms with nothing else running. Before
+`--max-num-batched-tokens 4096 --long-prefill-token-threshold 2048`, a judgment
+waited up to 25 s for such a prompt, with priority scheduling already on.
+
 ## von's defend_the_center benchmark
 
 von's benchmark plays ViZDoom's `defend_the_center` with von's own agent: a
@@ -429,6 +571,7 @@ Jev, and `bench/report.py` scores and compares the two.
 |---|---|---|---|
 | gemma-4-26B-A4B-it, QAT Q4_0 | `gemma-4-26B_q4_0-it.gguf` | `google/gemma-4-26B-A4B-it-qat-q4_0-gguf` | `3eca3b8f6d7baf218a7dd6bba5fb59a56ee25fe2d567b6f5f589b4f697eca51d` |
 | gemma-4-26B-A4B-it, Q4_0 (not QAT) | `gemma-4-26B-A4B-it-Q4_0-official.gguf` | not recorded; not Google's QAT release | `d208665ab1cd3a69f7a9a4bc59430e8448c8093d9b06334f566ac59d6d504a03` |
+| gemma-4-26B-A4B-it, NVFP4 (vLLM) | safetensors | `unsloth/gemma-4-26B-A4B-it-NVFP4`, revision `20df0542b1a86ce19f495ac2eca2c7c12bce82f9` | |
 | gemma-4-E4B-it, QAT Q4_0 | `gemma-4-E4B_q4_0-it.gguf` | `google/gemma-4-E4B-it-qat-q4_0-gguf` | `676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee` |
 | Qwen3.6-35B-A3B, UD-Q4_K_M | `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` | `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` | |
 | Qwen3.5-9B, Q4_K_M | `Qwen3.5-9B-Q4_K_M.gguf` | `unsloth/Qwen3.5-9B-GGUF` | |
@@ -444,6 +587,12 @@ Jev, and `bench/report.py` scores and compares the two.
 | `bench/cases.py`, `bench/cases_hard.py` | this project's easy (48) and hard (50) case sets, with their gold answers |
 | `bench/run_cases.py`, `bench/ask_jev.py`, `bench/report.py` | answer a case set with local models or with Jev, and compare the answers |
 | `bench/jevbench_compare.py` | the JevBench comparison table from these runs and JevBench's published per-item file |
+| `results/jevbench/gemma-4-26b-a4b-nvfp4-vllm.<tier>.jsonl` | the vLLM run at temperature 2.25 |
+| `bench/load.py` | throughput and latency with several requests at once |
+| `bench/fit_temperature.py` | the temperature fit on the case sets |
+| `bench/run_images.py`, `bench/images_commons.jsonl`, `bench/images_drawn.py` | the image questions: the Commons manifest (page, author, license, SHA-256), the drawn images, and the runner |
+| `docs/images/` | the four Commons pictures shown in the README, resized to 480 pixels; the README credits each |
+| `results/images/<set>-<run>.jsonl` | the image answers: `a` and `b` one at a time, `8` eight at a time, at temperature 2.25 |
 
 ## Open items
 
@@ -459,6 +608,15 @@ Jev, and `bench/report.py` scores and compares the two.
   (`llama_state_seq_get_data` / `set_data`) would remove that.
 - JevBench's official score needs its held-out and sealed items, which only its
   maintainers run.
+- vLLM gives different probabilities after each start with the same launch (see
+  "vLLM backend"). The cause is not found; FlashInfer's autotuner saved no
+  configurations, so it is not that. Until it is, a vLLM calibration is one
+  start's value.
+- The vLLM temperature was fitted on text. On images it leaves clear pictures
+  underconfident (median 0.954 on a set answered without error); a harder,
+  labeled image set would show whether images need their own value.
+- The QAT fit was never rerun with `bench/fit_temperature.py`, which was written
+  for the vLLM fit; the GPU was serving vLLM.
 - The temperature was fitted on 98 test questions that gemma-4-26B-A4B nearly
   all answers correctly. A larger and harder set with a permissive license,
   such as reasoning tasks from BIG-bench (Apache-2.0), would give a fit that
