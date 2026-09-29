@@ -185,8 +185,8 @@ def main() -> None:
     ap.add_argument("--vllm-workers", type=positive, default=8,
                     help="variants asked concurrently with --vllm-endpoint")
     ap.add_argument("--top-logprobs", type=positive, default=64,
-                    help="logprobs requested per position; must be >= options x fibers and "
-                         "<= the endpoint's --max-logprobs")
+                    help="the most labels one prompt may be read over (vLLM); must be >= options x "
+                         "fibers and <= the endpoint's --max-logprobs")
     ap.add_argument("--trace", metavar="PATH",
                     help="append each question's separate readings (rotations or fiber blocks) to PATH as JSON lines")
     method_arguments(ap)

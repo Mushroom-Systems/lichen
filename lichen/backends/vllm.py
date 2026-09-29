@@ -21,7 +21,8 @@ the softmax over the label tokens alone, and the top-N list holds every label an
 With a raw mode the top-N is taken over the whole vocabulary, and a confident model ranks its
 unlikely labels below other tokens: on gemma-4-26B-A4B, 3 of 6 labels were missing from the top
 64. The greedy request applies no temperature, so the processed values are the masked logits
-less one constant, which cancels in the softmax over the labels.
+less one constant, which cancels in the softmax over the labels -- provided no penalty moves
+them, so the request pins the penalties rather than inherit the server's defaults.
 
 The server needs --max-logprobs >= (options x fibers), at most 62; its default of 20 is too low
 for a wide choice. `_probs` still refuses a reply that lacks a label, which would otherwise read
@@ -125,6 +126,13 @@ class Endpoint:
             "max_tokens": 1, "temperature": 0.0,
             "logprobs": True, "top_logprobs": len(ids),
             "allowed_token_ids": ids, "return_tokens_as_token_ids": True,
+            # processed_logprobs puts every logits processor before the read, and vLLM fills any
+            # parameter a request omits from the model's generation_config (or the server's
+            # --override-generation-config). Greedy resets top-k, top-p and min-p, but not the
+            # penalties: a repetition_penalty != 1 would scale the labels the prompt already
+            # contains, which is not a constant and does not cancel. Pinned, so the read is the
+            # masked logits whatever the server's sampling defaults.
+            "repetition_penalty": 1.0, "presence_penalty": 0.0, "frequency_penalty": 0.0,
             # Lichen's chat_prompt renders with enable_thinking=False. It is load-bearing: with
             # thinking on, the first token is <think> and every decision is garbage -- silently,
             # since a distribution still comes back. A chat template defaults it to true, so this
