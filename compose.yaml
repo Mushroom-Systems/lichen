@@ -1,0 +1,77 @@
+# Lichen served from vLLM, and the same vLLM open to chat clients:
+#
+#   docker compose up -d --build
+#
+# vLLM loads unsloth's NVFP4 build of gemma-4-26B-A4B with a 128k context, and serves
+# chat, with thinking and images, on port 8000. Lichen starts once vLLM is healthy, which
+# takes a few minutes on the first run, and serves /v1/systemone on port 8765. Its
+# judgments go ahead of queued chat requests, and a prompt over 16k tokens is refused.
+# The README's "Serving from vLLM" gives the reason for each flag.
+#
+# Environment variables change the defaults below:
+#
+#   MODEL        the checkpoint vLLM loads
+#   NAME         the model name Lichen's replies carry
+#   TEMPERATURE  Lichen's label temperature. 2.25 is fitted for the default MODEL;
+#                bench/fit_temperature.py fits one for another model.
+#   MAX_LEN      vLLM's longest context, in tokens
+#   N_CTX        the most prompt tokens one judgment may use; at most MAX_LEN
+#   GPU_MEMORY   the part of the GPU's memory vLLM may take
+#   VLLM_PORT, LICHEN_PORT
+#                the host ports
+#   HF_CACHE     the Hugging Face cache on the host, where the weights are kept
+#   HF_TOKEN     passed to vLLM when set, for a gated model
+
+name: lichen
+
+services:
+  vllm:
+    image: vllm/vllm-openai:v0.30.0
+    ipc: host
+    ports: ["${VLLM_PORT:-8000}:8000"]
+    environment:
+      VLLM_BATCH_INVARIANT: "1"
+      HF_TOKEN:
+    volumes:
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
+    command:
+      - --model=${MODEL:-unsloth/gemma-4-26B-A4B-it-NVFP4}
+      - --served-model-name=gemma4
+      - --max-model-len=${MAX_LEN:-131072}
+      - --gpu-memory-utilization=${GPU_MEMORY:-0.94}
+      - --enable-prefix-caching
+      - --logprobs-mode=processed_logprobs
+      - --max-logprobs=64
+      - --scheduling-policy=priority
+      - --max-num-batched-tokens=4096
+      - --long-prefill-token-threshold=2048
+      - --reasoning-parser=gemma4
+      - '--default-chat-template-kwargs={"enable_thinking": true}'
+      # Lichen shows each image in both copies of the state, so its --max-images 4 needs 8.
+      - '--limit-mm-per-prompt={"image": 8, "audio": 0, "video": 0}'
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20m
+    restart: unless-stopped
+
+  lichen:
+    build: {context: ., target: vllm}
+    image: lichen:vllm
+    ports: ["${LICHEN_PORT:-8765}:8765"]
+    depends_on:
+      vllm: {condition: service_healthy}
+    command:
+      - --vllm-endpoint=http://vllm:8000
+      - --vllm-model=gemma4
+      - --model=${NAME:-gemma-4-26b-a4b-nvfp4}
+      - --vllm-priority=-1
+      - --max-images=4
+      - --temperature=${TEMPERATURE:-2.25}
+      - --n-ctx=${N_CTX:-16384}
+    restart: unless-stopped

@@ -209,7 +209,8 @@ def handler(backend, method: Method, trace=None, max_images: int = 0) -> type[Ba
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", required=True, help="path to a GGUF file")
+    ap.add_argument("--model", required=True,
+                    help="path to a GGUF file, or with --vllm-endpoint the name vLLM serves the model under")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--n-ctx", type=positive, default=32768,
