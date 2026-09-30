@@ -49,7 +49,7 @@ from .method import ContextOverflow, LABELS, Method, answer, method_arguments, m
 
 MAX_OPTIONS = len(LABELS)
 MAX_LEVELS = 10
-MAX_BODY = 32 << 20  # bytes; the text a 16k-token context holds is far less, and images are data URLs
+MAX_BODY = 32 << 20  # bytes; a judgment's text is far less, and images come inline as data URLs
 IMAGE_TYPES = ("png", "jpeg", "webp", "gif")
 
 
@@ -100,9 +100,11 @@ def parse_image(i: int, value) -> str:
     if not sep or not head.startswith("data:image/") or not head.endswith(";base64") or kind not in IMAGE_TYPES:
         raise BadRequest(f"images[{i}] must be a data URL, data:image/<{'|'.join(IMAGE_TYPES)}>;base64,<data>")
     try:
-        base64.b64decode(data, validate=True)
+        decoded = base64.b64decode(data, validate=True)
     except ValueError as exc:
         raise BadRequest(f"images[{i}] is not valid base64: {exc}") from exc
+    if not decoded:
+        raise BadRequest(f"images[{i}] has no data")
     return value
 
 

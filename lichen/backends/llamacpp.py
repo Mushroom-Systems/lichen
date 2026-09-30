@@ -6,8 +6,8 @@ softmax over the first token of each answer label. The Evaluator does this for
 several prompts at once, evaluating the prefix they share only once.
 
 `method` writes the messages and reads the answer; everything here knows
-llama.cpp, which is why `import llama_cpp` -- and the libcuda it loads -- lives
-in this module and nowhere else.
+llama.cpp, which is why `import llama_cpp`, and the libcuda it loads, is in
+this module and nowhere else.
 """
 
 import functools
@@ -121,8 +121,8 @@ def last_logits(model: Llama, prompt: str) -> numpy.ndarray:
     # Without logits_all, Llama.eval leaves model.scores empty; llama.cpp still holds
     # the logits of the last position, so read them from the context. The copy is
     # load-bearing, as it is in Evaluator.logits: as_array gives a view on llama.cpp's
-    # own buffer, which the next eval overwrites, so two of these otherwise read the
-    # same numbers -- which is what made --runoff without --batch split 50/50.
+    # own buffer, which the next eval overwrites. Without the copy two of these read
+    # the same numbers, and --runoff without --batch split every answer 50/50.
     return numpy.ctypeslib.as_array(
         llama_cpp.llama_get_logits_ith(model.ctx, -1), shape=(model.n_vocab(),)
     ).copy()
@@ -302,8 +302,8 @@ class Gguf:
     threaded = False  # a llama.cpp context is not safe to share between threads
 
     def __init__(self, name: str, model: Llama, n_ctx: int, evaluator: Evaluator | None = None):
-        # n_ctx is the context a judgment gets: with --batch the Llama's own is
-        # 256 and the Evaluator holds this one, so it is worth reporting.
+        # n_ctx is the context a judgment gets. With --batch the Llama's own is
+        # 256 and the Evaluator holds this one, so the startup line reports it.
         self.name, self.model, self.evaluator, self.where = name, model, evaluator, f"n_ctx {n_ctx}"
 
     def label_probs(self, asked: list[dict], method: Method) -> tuple[list[numpy.ndarray], int]:

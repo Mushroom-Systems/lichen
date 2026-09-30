@@ -150,6 +150,7 @@ def test_images_are_refused_unless_the_server_takes_them():
     ('["data:image/svg+xml;base64,PHN2Zz4="]', "must be a data URL"),
     ('["data:image/png,iVBORw0KGgo="]', "must be a data URL"),   # not base64
     ('["data:image/png;base64,not base64!"]', "not valid base64"),
+    ('["data:image/png;base64,"]', "has no data"),
     ('[1]', "must be a data URL"),
 ])
 def test_images_must_be_base64_data_urls(images, error):

@@ -6,7 +6,7 @@ llama.cpp-specific. This module gets them over HTTP from vLLM; `method` does the
 Method, variants, rotations, fibers, readings, shrink, disagreement, runoff and confidence are
 the same code that serves a GGUF, not a second copy of it.
 
-Two reasons it is worth having:
+Two reasons to use it in place of the local server:
 
   * The local server answers one request at a time (see README's "Limits"). vLLM does
     continuous batching, and with --enable-prefix-caching gives for free the shared-prefix
@@ -21,8 +21,8 @@ the softmax over the label tokens alone, and the top-N list holds every label an
 With a raw mode the top-N is taken over the whole vocabulary, and a confident model ranks its
 unlikely labels below other tokens: on gemma-4-26B-A4B, 3 of 6 labels were missing from the top
 64. The greedy request applies no temperature, so the processed values are the masked logits
-less one constant, which cancels in the softmax over the labels -- provided no penalty moves
-them, so the request pins the penalties rather than inherit the server's defaults.
+less one constant, which cancels in the softmax over the labels. That holds only if no penalty
+moves them, so the request pins the penalties rather than inherit the server's defaults.
 
 The server needs --max-logprobs >= (options x fibers), at most 62; its default of 20 is too low
 for a wide choice. `_probs` still refuses a reply that lacks a label, which would otherwise read
@@ -52,9 +52,9 @@ tokens it evaluated after its cached prefix, so the two are not comparable as co
 
 Not ported: --recheck, whose second round would want the endpoint's own answer written back,
 and --embedding. Asked for, they raise rather than be ignored. Nor are the prompts that
-llamacpp.render builds per model -- Granite Guardian's criteria, Qwen3Guard's plain ChatML, and
-closing a reasoning block a template leaves open (LFM2.5) -- so those models are refused rather
-than read with a prompt they were never given (`check_model`). Nothing here needs vLLM
+llamacpp.render builds per model: Granite Guardian's criteria, Qwen3Guard's plain ChatML, and
+closing a reasoning block a template leaves open (LFM2.5). Those models are refused rather than
+read with a prompt they were never given (`check_model`). Nothing here needs vLLM
 installed: the engine is reached over HTTP, and a `pip install lichen` is the whole dependency.
 """
 
@@ -142,14 +142,14 @@ class Endpoint:
             raise RuntimeError(
                 "this model's chat template opens a reasoning block with thinking off, so the "
                 "next token is reasoning, not a label. The llama.cpp backend closes it; this one "
-                "does not -- serve it from a GGUF rather than --vllm-endpoint")
+                "does not. Serve it from a GGUF rather than --vllm-endpoint")
         self._model_checked = True
 
     def check_labels(self, labels: list[str]) -> None:
         """lichen's invariant: every label is exactly one token, and no two share one.
 
-        Same check, same reason -- a label that splits cannot be read from one next-token
-        distribution, so it is an error rather than a quietly wrong answer.
+        Same check, same reason: a label that splits cannot be read from one next-token
+        distribution, so it is an error rather than a wrong answer that raises nothing.
         """
         unknown = [l for l in labels if l not in self._tokens]
         for label in unknown:
@@ -205,8 +205,8 @@ class Endpoint:
             # masked logits whatever the server's sampling defaults.
             "repetition_penalty": 1.0, "presence_penalty": 0.0, "frequency_penalty": 0.0,
             # Lichen's chat_prompt renders with enable_thinking=False. It is load-bearing: with
-            # thinking on, the first token is <think> and every decision is garbage -- silently,
-            # since a distribution still comes back. A chat template defaults it to true, so this
+            # thinking on, the first token is <think> and every decision is garbage, with no
+            # error, since a distribution still comes back. A chat template defaults it to true, so this
             # override per request is what makes the method work at all.
             "chat_template_kwargs": {"enable_thinking": self.thinking},
         }

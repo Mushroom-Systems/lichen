@@ -64,7 +64,7 @@ import argparse
 import json
 import string
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 
 import numpy
 
@@ -408,7 +408,6 @@ def method_arguments(ap: argparse.ArgumentParser) -> None:
 def method_from(args: argparse.Namespace, guard: bool) -> Method:
     if args.batch and args.recheck:
         raise SystemExit("--recheck does not work with --batch")
-    return Method(SYSTEM + GUARD if guard else SYSTEM, args.permute, args.repeat, args.options_once,
-                  args.question_first, args.compact_json, args.rotate_last, args.batch, args.recheck,
-                  args.embedding, args.fibers, args.fiber_same, args.fiber_map,
-                  args.shrink, args.runoff, args.temperature)
+    # Every field but the system prompt is the option of the same name.
+    options = {f.name: getattr(args, f.name) for f in fields(Method) if f.name != "system"}
+    return Method(system=SYSTEM + GUARD if guard else SYSTEM, **options)
