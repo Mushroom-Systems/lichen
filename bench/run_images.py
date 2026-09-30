@@ -35,6 +35,8 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+import web
+
 HERE = pathlib.Path(__file__).resolve().parent
 CACHE = pathlib.Path.home() / ".cache" / "lichen-images"
 USER_AGENT = "lichen-image-bench/0.1 (https://github.com/Mushroom-Systems/lichen)"
@@ -73,9 +75,7 @@ def fetch(row: dict) -> tuple[bytes, bool]:
     """The image's bytes, and whether they are the ones listed."""
     path = CACHE / f"{row['sha256']}.img"
     if not path.exists():
-        req = urllib.request.Request(row["url"], headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            data = r.read()
+        data = web.read(urllib.request.Request(row["url"], headers={"User-Agent": USER_AGENT}), timeout=60)
         CACHE.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
     data = path.read_bytes()
@@ -122,8 +122,7 @@ def drawn() -> list[dict]:
 def post(url: str, body: dict) -> dict:
     req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=600) as r:
-            return json.load(r)
+        return json.loads(web.read(req))
     except urllib.error.HTTPError as exc:
         raise SystemExit(f"HTTP {exc.code}: {exc.read()[:400].decode(errors='replace')}") from exc
 
@@ -180,12 +179,14 @@ def main() -> None:
     if changed:
         print(f"{changed} downloaded images differ from the listed SHA-256", file=sys.stderr)
     start = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        rows = list(pool.map(lambda i: judge(args.url, i), items))
-    wall = time.perf_counter() - start
-    with open(args.out, "w", encoding="utf-8") as f:
-        for r in rows:
+    rows = []
+    # Each answer is written as it comes, so a run that fails part way keeps what it has.
+    with ThreadPoolExecutor(max_workers=args.workers) as pool, open(args.out, "w", encoding="utf-8") as f:
+        for r in pool.map(lambda i: judge(args.url, i), items):
+            rows.append(r)
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            f.flush()
+    wall = time.perf_counter() - start
 
     ms = sorted(r["latency_ms"] for r in rows)
     print(f"{args.set}: {sum(r['right'] for r in rows)}/{len(rows)} right; latency p50 {statistics.median(ms):.0f} ms, "

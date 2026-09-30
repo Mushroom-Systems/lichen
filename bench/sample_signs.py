@@ -31,6 +31,8 @@ import time
 import urllib.parse
 import urllib.request
 
+import web
+
 USER_AGENT = "lichen-image-bench/0.1 (https://github.com/Mushroom-Systems/lichen)"
 API = "https://commons.wikimedia.org/w/api.php"
 
@@ -38,8 +40,7 @@ API = "https://commons.wikimedia.org/w/api.php"
 def get(**params) -> dict:
     params.update(action="query", format="json")
     req = urllib.request.Request(API + "?" + urllib.parse.urlencode(params), headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.load(r)
+    return json.loads(web.read(req, timeout=60))
 
 
 def permissive(name: str) -> bool:
@@ -73,9 +74,7 @@ def draw(category: str, n: int, seen: set) -> list[dict]:
             license_name = plain(meta.get("LicenseShortName", {}).get("value"))
             if len(kept) >= n or not ii or ii.get("mime") != "image/jpeg" or not permissive(license_name):
                 continue
-            req = urllib.request.Request(ii["thumburl"], headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=60) as r:
-                data = r.read()
+            data = web.read(urllib.request.Request(ii["thumburl"], headers={"User-Agent": USER_AGENT}), timeout=60)
             seen.add(title)
             kept.append({"title": title, "page": ii["descriptionurl"], "url": ii["thumburl"],
                          "sha256": hashlib.sha256(data).hexdigest(), "license": license_name,
