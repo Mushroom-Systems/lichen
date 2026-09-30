@@ -388,8 +388,8 @@ generates no tokens.
 ## vLLM backend
 
 These runs used vLLM 0.30.0 (the `vllm/vllm-openai:v0.30.0` image) on the same
-GPU, serving unsloth's NVFP4 build of gemma-4-26B-A4B with the launch in the
-README's "Serving from vLLM", on 2026-09-28 and 2026-09-29. It is quantized
+GPU, serving unsloth's NVFP4 build of gemma-4-26B-A4B with the launch of
+`compose.yaml` (the README's "Run it"), on 2026-09-28 and 2026-09-29. It is quantized
 from `google/gemma-4-26B-A4B-it` after training, not from the QAT checkpoint the
 GGUF comes from, so the two backends do not run the same weights. That build stores
 the experts and the shared feed-forward layers in NVFP4 and attention in FP8,
