@@ -2,9 +2,17 @@
 
     python run_images.py SET OUT.jsonl [--url URL] [--workers N] [--same-as EARLIER.jsonl]
 
-SET is `commons`, 125 photos, paintings, signs and charts from Wikimedia Commons, listed with
-their licenses and authors in images_commons.jsonl, or `drawn`, the 84 images of
-images_drawn.py. The server must run with --vllm-endpoint and --max-images 1 or more.
+SET is one of:
+
+  commons       125 photos, paintings, signs and charts from Wikimedia Commons, checked by eye,
+                listed with their licenses and authors in images_commons.jsonl
+  drawn         the 84 images of images_drawn.py
+  signs         the road signs of images_signs.jsonl, drawn at random from Commons (see
+                sample_signs.py), asked with six options: five signs, or "another sign, or no
+                road sign". Removed images and those labeled unclear are left out.
+  signs-forced  the random draw of images_signs.jsonl, asked with the five signs only
+
+The server must run with --vllm-endpoint and --max-images 1 or more.
 
 Each image is one request: the state "The attached image.", the image, and its task's
 question. The Commons images are downloaded once into ~/.cache/lichen-images; a file whose
@@ -50,6 +58,10 @@ QUESTIONS = {
     "chart": choice("What kind of chart is this?",
                     {"bar": "Bar chart", "pie": "Pie chart", "line": "Line chart"}),
 }
+SIGNS = {"stop": "Stop", "yield": "Yield, or give way", "one_way": "One way", "speed_limit": "Speed limit",
+         "no_entry": "No entry, or do not enter"}
+QUESTIONS["sign6"] = choice("Which road sign is in the image?", SIGNS | {"other": "Another sign, or no road sign"})
+QUESTIONS["sign5"] = choice("Which road sign is in the image?", SIGNS)
 
 
 def data_url(data: bytes) -> str:
@@ -78,6 +90,19 @@ def commons() -> list[dict]:
         truth = row["label"] == "yes" if row["task"] == "snow" else row["label"]
         items.append({"task": row["task"], "id": row["title"], "truth": truth, "url": data_url(data),
                       "question": QUESTIONS[row["task"]], "listed_bytes": listed})
+    return items
+
+
+def signs(forced: bool) -> list[dict]:
+    items = []
+    for line in open(HERE / "images_signs.jsonl", encoding="utf-8"):
+        row = json.loads(line)
+        if row["removed"] or row["label"] == "unclear" or (forced and row["set"] != "random"):
+            continue
+        data, listed = fetch(row)
+        task = "sign5" if forced else "sign6"
+        items.append({"task": task, "id": row["title"], "truth": row["label"], "url": data_url(data),
+                      "question": QUESTIONS[task], "listed_bytes": listed, "set": row["set"]})
     return items
 
 
@@ -120,6 +145,13 @@ def judge(url: str, item: dict) -> dict:
                   "input_tokens": reply["usage"]["input_tokens"], "answer": a}
 
 
+def top(answer: dict) -> float:
+    """The probability of the answer given: the top option, or the side of a noul it falls on."""
+    if answer["type"] == "noul":
+        return max(answer["noul"], 1 - answer["noul"])
+    return max(answer["probabilities"].values())
+
+
 def spread(answer: dict) -> dict:
     return answer.get("probabilities") or {"yes": answer["noul"]}
 
@@ -135,14 +167,15 @@ def same_as(rows: list[dict], path: str) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("set", choices=["commons", "drawn"])
+    ap.add_argument("set", choices=["commons", "drawn", "signs", "signs-forced"])
     ap.add_argument("out")
     ap.add_argument("--url", default="http://localhost:8765/v1/systemone")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--same-as", metavar="EARLIER")
     args = ap.parse_args()
 
-    items = commons() if args.set == "commons" else drawn()
+    items = {"commons": commons, "drawn": drawn, "signs": lambda: signs(False),
+             "signs-forced": lambda: signs(True)}[args.set]()
     changed = sum(not i.get("listed_bytes", True) for i in items)
     if changed:
         print(f"{changed} downloaded images differ from the listed SHA-256", file=sys.stderr)
@@ -158,11 +191,16 @@ def main() -> None:
     print(f"{args.set}: {sum(r['right'] for r in rows)}/{len(rows)} right; latency p50 {statistics.median(ms):.0f} ms, "
           f"p95 {ms[int(0.95 * (len(ms) - 1))]:.0f} ms, max {ms[-1]:.0f} ms; {len(rows) / wall:.1f} requests/s "
           f"with {args.workers} at once; input tokens p50 {statistics.median(r['input_tokens'] for r in rows):.0f}")
-    for task in dict.fromkeys(r["task"] for r in rows):
-        t = [r for r in rows if r["task"] == task]
+    confident = {ok: [top(r["answer"]) for r in rows if r["right"] == ok] for ok in (True, False)}
+    print("  median probability of the top answer: " + ", ".join(
+        f"{'right' if ok else 'wrong'} {statistics.median(v):.3f}" for ok, v in confident.items() if v))
+    # A sign question is one task; its answers are grouped by draw and label instead.
+    group = (lambda r: f"{r['set']}/{r['truth']}") if args.set.startswith("signs") else (lambda r: r["task"])
+    for task in dict.fromkeys(map(group, rows)):
+        t = [r for r in rows if group(r) == task]
         wrong = [f"{r['truth']}->{round(r['got'], 2) if isinstance(r['got'], float) else r['got']}"
                  for r in t if not r["right"]]
-        print(f"  {task:8} {sum(r['right'] for r in t):3}/{len(t):3}" + (f"  wrong: {', '.join(wrong)}" if wrong else ""))
+        print(f"  {task:18} {sum(r['right'] for r in t):3}/{len(t):3}" + (f"  wrong: {', '.join(wrong)}" if wrong else ""))
     if args.same_as:
         print(same_as(rows, args.same_as))
 
