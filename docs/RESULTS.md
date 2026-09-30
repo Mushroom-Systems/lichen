@@ -551,7 +551,7 @@ road sign" and asks both draws:
 - Made to choose, it misses 5 of 19 one-way signs and one yield sign, all small
   in a street scene, and is unsure of each (0.631 at the median).
 - Given "another sign", 24 of its 25 misses on the random draw are that answer,
-  15 of them at 0.8 or more. They are small or distant signs, a sign buried in
+  14 of them at 0.8 or more. They are small or distant signs, a sign buried in
   snow, three pedestrian or no-vehicle prohibitions (for which "another sign" is
   a fair reading), and two no-entry signs with stickers. The 25th shows one-way
   and no-entry panels together and reads no entry.

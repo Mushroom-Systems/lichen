@@ -195,7 +195,7 @@ way and labeled by hand before any run (`bench/sample_signs.py` has the rules).
 
 Made to choose, it names the right sign in 92 of 98 photos, and is unsure of
 the six it misses. Given a way out, it takes it too often: 24 of its 25 misses
-on the random draw are "another sign", 15 of them at 0.8 or more. They are
+on the random draw are "another sign", 14 of them at 0.8 or more. They are
 small or distant signs in street scenes, a sign buried in snow, no-entry signs
 altered with stickers or paint, as in the last two pictures above, and three
 pedestrian or no-vehicle bans that Commons files under no entry, where "another
@@ -381,7 +381,7 @@ trusted network. `GET /health` returns the model's name once it has loaded.
 `--vllm-endpoint URL` reads the same method from a vLLM server instead of a
 local GGUF. That opens up checkpoints only vLLM serves (FP8, AWQ, NVFP4), and
 the one vLLM server can also answer chat requests, with thinking, and read
-images. On the 24 GB laptop GPU, the configuration of [Run it](#with-vllm)
+images. On the 24 GB laptop GPU, the configuration of [With vLLM](#with-vllm)
 serves Lichen's judgments with prompts of up to 16k tokens, and chat with up to
 128k.
 
@@ -471,18 +471,24 @@ build of llama-cpp-python for a GGUF.
 | `--n-ctx N` | Most prompt tokens a judgment may use, refused with 422 above it; on a GGUF also the context llama.cpp allocates. 16384 in both images. |
 | `--n-ubatch N` | Tokens per GPU pass on a GGUF, 1024 by default. 2048 makes long prompts 7-9% faster and cost 2 of the 111 hard JevBench items. |
 | `--repeat N` | Copies of the state and question in the prompt; 2 in both images. 3 added one hard JevBench item and improved calibration, for 50% more input tokens. |
+| `--options-once` | With `--repeat`, list the options once, at the end, in place of once per copy. |
 | `--fibers M`, `--fiber-map` | List each option M times in one prompt, in rotated blocks, and read the answer as the sum over each option's letters; with `--fiber-map`, list the options first and then map letters to them. Both images use 2 and the map. |
+| `--fiber-same` | With `--fibers`, repeat the blocks in the same order in place of rotating them. |
 | `--permute` | Ask a choice once per rotation of its options and average. With `--fibers`, only a list that would pass 62 letters falls back to this; without `--permute`, such a list is asked once. |
 | `--shrink` | Move each answer toward uniform by how far its readings disagree. On in both images. |
 | `--temperature T` | Divide the label logits by T before the softmax: 1.25 in the llama.cpp image, fitted for gemma-4-26B-A4B QAT, and 2.25 in the vLLM image, fitted for its NVFP4 build. `bench/fit_temperature.py` fits it for another model. |
 | `--runoff D` | When a choice's readings disagree by more than D, ask its two leading options alone and split their mass by that answer. Off by default: it added 3 hard JevBench items for gemma-4-E4B and cost 4 for gemma-4-26B-A4B. |
 | `--question-first` | Put the question before the state in each copy. On in the vLLM image; on the QAT GGUF it cost 6 hard JevBench items. |
 | `--compact-json`, `--rotate-last` | JSON without spaces, and, when rotating, rotating only the last copy's options. `--compact-json` saves little on JevBench. |
+| `--batch` | On a GGUF, read a question's shared prefix once and evaluate its rotations or blocks together. On in the llama.cpp image. vLLM caches the prefix itself, so with `--vllm-endpoint` it does nothing. |
+| `--recheck` | Ask a second turn that shows the first answer, and read that answer. Not with `--batch` or `--vllm-endpoint`. |
 | `--trace PATH` | Append each question's separate readings to PATH as JSON lines. |
 | `--kv KEY=VALUE` | Override model metadata at load, such as `gemma4.expert_used_count=6`. |
 | `--no-guard` | Leave out the system-prompt line about instructions inside the state. |
 | `--embedding` | Serve an embedding model, answering by cosine similarity. |
 | `--vllm-endpoint URL`, `--vllm-model NAME` | Read the model from a vLLM server instead of a GGUF (see [Serving from vLLM](#serving-from-vllm)). |
+| `--vllm-workers N` | With `--vllm-endpoint`, the prompts of one question sent at once; 8 by default. |
+| `--top-logprobs N` | With `--vllm-endpoint`, the most labels one prompt may be read over; 64 by default. It must be at least options × fibers, and at most vLLM's `--max-logprobs`. |
 | `--vllm-priority P` | vLLM scheduling priority of each judgment, lower first; needs vLLM's `--scheduling-policy priority`. |
 | `--max-images N` | Most images a request may carry; 0 by default. Needs `--vllm-endpoint`, and vLLM's `--limit-mm-per-prompt` must allow N × `--repeat`. |
 | `--port N`, `--host H` | Where to listen; 8765 on 0.0.0.0 by default. |
