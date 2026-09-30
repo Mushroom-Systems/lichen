@@ -1,0 +1,30 @@
+T  1.0  commons  NLL 0.0238  Brier 0.0081  125/125
+T  1.0  drawn    NLL 0.1111  Brier 0.0429  82/84
+T  1.0  signs    NLL 1.2028  Brier 0.3588  138/169
+T 1.25  commons  NLL 0.0307  Brier 0.0093  125/125
+T 1.25  drawn    NLL 0.1290  Brier 0.0480  82/84
+T 1.25  signs    NLL 1.0287  Brier 0.3532  138/169
+T  1.5  commons  NLL 0.0402  Brier 0.0111  125/125
+T  1.5  drawn    NLL 0.1491  Brier 0.0543  82/84
+T  1.5  signs    NLL 0.9212  Brier 0.3478  138/169
+T 1.75  commons  NLL 0.0514  Brier 0.0134  125/125
+T 1.75  drawn    NLL 0.1696  Brier 0.0613  82/84
+T 1.75  signs    NLL 0.8541  Brier 0.3432  138/169
+T  2.0  commons  NLL 0.0658  Brier 0.0164  125/125
+T  2.0  drawn    NLL 0.1912  Brier 0.0692  82/84
+T  2.0  signs    NLL 0.8133  Brier 0.3400  138/169
+T 2.25  commons  NLL 0.0807  Brier 0.0199  125/125
+T 2.25  drawn    NLL 0.2121  Brier 0.0773  82/84
+T 2.25  signs    NLL 0.7904  Brier 0.3385  138/169
+T 2.75  commons  NLL 0.1166  Brier 0.0294  125/125
+T 2.75  drawn    NLL 0.2524  Brier 0.0942  82/84
+T 2.75  signs    NLL 0.7784  Brier 0.3409  138/169
+T  3.5  commons  NLL 0.1777  Brier 0.0496  125/125
+T  3.5  drawn    NLL 0.3067  Brier 0.1194  82/84
+T  3.5  signs    NLL 0.8030  Brier 0.3557  138/169
+T  5.0  commons  NLL 0.2984  Brier 0.1034  125/125
+T  5.0  drawn    NLL 0.3966  Brier 0.1655  82/84
+T  5.0  signs    NLL 0.8879  Brier 0.4006  138/169
+all images: lowest NLL at temperature 2.25 (0.4272)
+fit on commons+drawn: temperature 1.0; NLL on signs 1.2028, at 1.25 1.0287, at 1.5 0.9212, at 1.75 0.8541, at 2.0 0.8133, at 2.25 0.7904, at 2.75 0.7784, at 3.5 0.8030, at 5.0 0.8879
+fit on signs: temperature 2.75; NLL on commons+drawn 0.1712, at 1.0 0.0589, at 1.25 0.0702, at 1.5 0.0840, at 1.75 0.0989, at 2.0 0.1162, at 2.25 0.1335, at 3.5 0.2295, at 5.0 0.3379

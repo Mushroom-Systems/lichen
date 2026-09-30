@@ -10,8 +10,11 @@ state, and the questions are then answered about the pictures.
 With Google's gemma-4-26B-A4B on one 24 GB laptop GPU, Lichen answers 204 to
 207 of the 231 public decisions of [JevBench](https://github.com/fstandhartinger/jevbench),
 against 200 for Jev 1.13. Served from vLLM, a decision takes 56 ms at the
-median. It answered all 125 questions of a test set of Wikimedia Commons photos,
-road signs and charts, and the same vLLM server holds a 128k-token chat, with
+median. It answered all 125 questions of a hand-checked set of Wikimedia Commons
+photos, and named the right sign in 92 of 98 road-sign photos drawn at random
+from Commons. Asked the same with "none of these" as an option, it missed a
+quarter of those signs, and was sure of most of the misses (see
+[Results](#results)). The same vLLM server holds a 128k-token chat, with
 thinking and images, while it judges.
 
 ## What it does
@@ -48,9 +51,9 @@ Each answer comes back with a probability for every option:
 ```
 
 With images, the state is the picture together with a line of text. Here are
-four of the test pictures, with what was asked and what came back. The first
-three are Lichen judgments; the chart went to the chat endpoint of the same vLLM
-server, with thinking on.
+six of the test pictures, with what was asked and what came back: four it read
+well, and two it got wrong with confidence. The chart went to the chat endpoint
+of the same vLLM server, with thinking on; the others are Lichen judgments.
 
 | Picture | Request | Answer |
 |---|---|---|
@@ -58,11 +61,15 @@ server, with thinking on.
 | <img src="docs/images/painted-sign.jpg" width="240" alt="A no-entry sign with a stick figure painted on it, sawing the white bar"> | **State:** the picture, and the text "A photo from a street survey."<br><br>**Choice:** Which road sign is in the image? (stop, one way, speed limit, no entry) | **no entry**, 0.700; about 0.10 for each of the others. In the benchmark, with the text "The attached image.", this was the least certain of the 125 Commons answers, at 0.41. |
 | <img src="docs/images/snowy-balcony.jpg" width="240" alt="A snow-covered balcony over a town in falling snow"> | **State:** the picture, and the text "A photo sent in with a weather report."<br><br>**Choice:** Was this picture taken by day or at night?<br><br>**Yes/no:** Is there snow in the image? | **day**, 0.929<br><br><br>**yes**, 0.9999 |
 | <img src="docs/images/pie-chart.jpg" width="240" alt="A pie chart of South Australian passenger car builders, 1880 to 1921"> | **Chat:** the picture, and "Which builder made the largest share of these cars, and about how many cars is that out of the total? Answer in two sentences." | After 934 tokens of thinking, in 10.0 s: "SAR Islington Works made the largest share of these cars, accounting for 51% of the total. This represents approximately 86 cars out of the 168 built." The chart gives 51% of 168. |
+| <img src="docs/images/one-way-overpass.jpg" width="240" alt="A road passing under a highway overpass, with a small one-way sign on a pole at the left"> | **State:** the picture, and the text "The attached image."<br><br>**Choice:** Which road sign is in the image? (stop, yield, one way, speed limit, no entry, or another sign or no road sign) | **other**, 0.974. Wrong: the small sign on the pole at the left, under the overpass, is a one-way sign. Without the "other" option it answered stop, at 0.32. |
+| <img src="docs/images/freedom-sign.jpg" width="240" alt="A round red no-entry sign with the word FREEDOM painted over its white bar"> | **State:** the picture, and the text "The attached image."<br><br>**Choice:** the same six options | **other**, 0.955. Wrong: this is a no-entry sign with its bar painted over. 6 of the 7 altered no-entry signs in the test read as "other". |
 
 Pictures, resized to 480 pixels: [Trougnouf (Benoit Brummer)](https://commons.wikimedia.org/wiki/File:A_person_in_blue_standing_next_to_a_stop_sign_in_Anseremme,_Belgium_(DSCF7416).jpg), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0);
 [Project-128](https://commons.wikimedia.org/wiki/File:Saw_street_sign_(14167641036).jpg), [CC BY 2.0](https://creativecommons.org/licenses/by/2.0);
 [Katherine Bowman](https://commons.wikimedia.org/wiki/File:Crystal_City_Snow_-_Daytime_Balcony_View_(4199057962).jpg), [CC BY 2.0](https://creativecommons.org/licenses/by/2.0);
-[SCHolar44](https://commons.wikimedia.org/wiki/File:Pie_chart_--_South_Australian_end-loading_passenger_car_builders.png), CC0.
+[SCHolar44](https://commons.wikimedia.org/wiki/File:Pie_chart_--_South_Australian_end-loading_passenger_car_builders.png), CC0;
+[Michael Rivera](https://commons.wikimedia.org/wiki/File:WB_CR318_at_I75_overpass.jpg), CC0;
+[Matt Brown](https://commons.wikimedia.org/wiki/File:Freedom_no_entry.jpg), [CC BY 2.0](https://creativecommons.org/licenses/by/2.0).
 
 ## How it works
 
@@ -167,24 +174,42 @@ On the hard tier, gemma-4-26B-A4B QAT also has a calibration error (ECE) of
 76.3. JevBench's official score also uses held-out items and weighs calibration,
 speed and cost, so this table is the public part only.
 
-For images, `bench/run_images.py` asks one question about each image in two
-sets, one request per image, on the vLLM configuration:
+For images, `bench/run_images.py` asks one question about each image, one
+request per image, on the vLLM configuration:
 
-| Set | Right | p50 | Per request |
+| Set | Right | Median top probability, right / wrong | p50 |
 |---|---|---|---|
-| 125 photos, paintings, road signs and charts from Wikimedia Commons (`bench/images_commons.jsonl`) | 125/125 | 182 ms | 787 tokens |
-| 84 drawn images with exact answers (`bench/images_drawn.py`) | 82/84 | 167 ms | 755 tokens |
+| 125 photos, paintings, road signs and charts from Wikimedia Commons, checked by eye (`bench/images_commons.jsonl`) | 125/125 | 0.963 / none | 182 ms |
+| 84 drawn images with exact answers (`bench/images_drawn.py`) | 82/84 | 0.907 / 0.443 | 167 ms |
+| 98 road-sign photos drawn at random from Commons (`bench/images_signs.jsonl`); five signs to choose from | 92/98 | 0.947 / 0.631 | 189 ms |
+| The same 98, with "another sign, or no road sign" as a sixth option | 73/98 | 0.905 / 0.833 | 197 ms |
+| 71 photos of damaged and obscured signs, with the same six options | 65/71 | 0.805 / 0.739 | 190 ms |
 
-The Commons images are CC0, public domain or CC BY. The file lists each one's
-page, author and license, and the script downloads them. Each was checked by
-eye and the unclear ones left out, so the set shows the method working on real
-pictures, not how far it can be pushed. The median confidence was 0.954. The
-least sure answers were a no-entry sign with a figure painted on it (0.41,
-still the top answer), bar charts with many bars (0.61), and two plain photos of
-cars (0.64 and 0.65). The temperature was fitted on text questions, and it
-makes these easy pictures look less certain than they are: at 1.25 the median
-was 0.998 and the cars were above 0.99. The two drawn misses are dot counts,
-four read as five and five as six.
+All the images are CC0, public domain or CC BY; the files list each one's page,
+author and license, and the script downloads them. The first set was checked by
+eye and the unclear pictures left out, so it shows the method working, not
+where it fails. The road signs were drawn in random order from Commons' sign
+categories and labeled by their category, with only a painting and a photo
+without its sign removed. The damaged and obscured signs were drawn the same
+way and labeled by hand before any run (`bench/sample_signs.py` has the rules).
+
+Made to choose, it names the right sign in 92 of 98 photos, and is unsure of
+the six it misses. Given a way out, it takes it too often: 24 of its 25 misses
+on the random draw are "another sign", 15 of them at 0.8 or more. They are
+small or distant signs in street scenes, a sign buried in snow, no-entry signs
+altered with stickers or paint, as in the last two pictures above, and three
+pedestrian or no-vehicle bans that Commons files under no entry, where "another
+sign" is a fair answer.
+
+The confidence is therefore not calibrated on pictures, and it errs both ways.
+On the clear pictures it is too low: every Commons answer is right, but the
+median is 0.963, and plain photos of cars read 0.64. On the random signs with a
+way out, it is too high. The temperature, 2.25, was fitted on text; over all
+378 labeled images it is still the best single value, and fitting one on either
+group makes the other worse (details in [docs/RESULTS.md](docs/RESULTS.md)).
+Use an image answer's probability to compare answers; it does not give the
+chance that the answer is right. The two drawn misses are dot counts, four read
+as five and five as six.
 
 [docs/RESULTS.md](docs/RESULTS.md) has the published systems for comparison,
 the other models tried, a Doom benchmark, the speed measurements and the method
@@ -485,6 +510,10 @@ another. A choice takes 2 to 62 options, one label each (A-Z, a-z, 0-9), and a
 score 2 to 10 levels, one digit each. Jev does not publish how it computes a
 score's confidence, so Lichen uses the choice formula for both. Every
 measurement comes from one GPU model.
+
+On pictures, the probabilities are not calibrated: too low on clear pictures,
+too high on small or altered signs when "none of these" is an option (see
+[Results](#results)).
 
 Each start of vLLM can give different probabilities, even with the same launch
 and `VLLM_BATCH_INVARIANT=1`: over three starts, one JevBench item's top answer

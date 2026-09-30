@@ -511,11 +511,76 @@ shape), with the same top answer; at temperature 1.25 the largest move was
 0.012. Batch invariance does not cover images read together, and shrink
 enlarges a small change in how far the two blocks disagree.
 
-At temperature 2.25 the Commons answers have a median confidence of 0.954, and
-at 1.25 of 0.998. Every answer is right, so the higher temperature makes them
-less sure than they need to be; clear photos of a car read 0.64. The
-temperature was fitted on text questions, and this image set is easier than
-they are.
+At temperature 2.25 the median probability of the Commons answers' top option
+(for a noul, the side it falls on) is 0.963, and at 1.25 it is 0.999. Every
+answer is right, so the higher temperature makes them less sure than they need
+to be: the two least sure photos of a car read 0.64 and 0.65, and 0.82 and 0.84
+at 1.25. The temperature was fitted on text questions, and this image set is
+easier than they are.
+
+#### Road signs drawn at random
+
+The Commons set was checked by eye, so it shows the method working rather than
+where it fails. `bench/images_signs.jsonl` leaves that choice out.
+`bench/sample_signs.py` asked Commons search for files in random order from five
+category trees (Photographs of stop signs, Photographs of yield signs, One-way
+traffic road signs, Speed limit road signs, No entry road signs) and kept the
+first 20 JPEGs of each with a CC0, public domain or CC BY license. The label is
+the category. Before any run, each image was checked for two things only: that
+it is a photograph, and that the sign its category names is in it. Two of 100
+failed: a painting, and a yield file that shows only a priority-road sign.
+Commons files pedestrian and no-vehicle prohibitions under no entry, and those
+keep that label.
+
+A second draw took 40 files from Damaged road signs and 40 from Obscured road
+signs, labeled by hand before any run: 58 other (mostly guide signs covered
+during road works, and street-name plates), 7 no entry (all altered with stickers or
+paint), 3 speed limit, 2 stop and 1 yield. Five with no single right
+answer are labeled unclear and left out, and 4 scans of drawings were removed.
+
+`bench/run_images.py signs-forced` asks the random draw "Which road sign is in
+the image?" with the five signs as options; `signs` adds "Another sign, or no
+road sign" and asks both draws:
+
+| Question | Draw | Right | Median top probability, right / wrong | p50 |
+|---|---|---|---|---|
+| five signs | random | 92/98 | 0.947 / 0.631 | 189 ms |
+| five signs, or another sign | random | 73/98 | 0.905 / 0.833 | 197 ms |
+| five signs, or another sign | damaged and obscured | 65/71 | 0.805 / 0.739 | 190 ms |
+
+- Made to choose, it misses 5 of 19 one-way signs and one yield sign, all small
+  in a street scene, and is unsure of each (0.631 at the median).
+- Given "another sign", 24 of its 25 misses on the random draw are that answer,
+  15 of them at 0.8 or more. They are small or distant signs, a sign buried in
+  snow, three pedestrian or no-vehicle prohibitions (for which "another sign" is
+  a fair reading), and two no-entry signs with stickers. The 25th shows one-way
+  and no-entry panels together and reads no entry.
+- On the second draw, every miss is an altered no-entry sign read as another
+  sign, from 0.40 to 0.95. It answers all 58 guide signs and plates correctly.
+
+#### A temperature for images
+
+The confidence is off in both directions: too low on the clear pictures, too
+high on the random signs when "another sign" is an option. A temperature
+changes no answer, so it can only trade one for the other.
+`bench/fit_image_temperature.py` gives the mean NLL of each set at each
+temperature, with the served method:
+
+| Temperature | Commons (125) | Drawn (84) | Signs, six options (169) |
+|---|---|---|---|
+| 1.0 | 0.024 | 0.111 | 1.203 |
+| 1.5 | 0.040 | 0.149 | 0.921 |
+| 2.25 | 0.081 | 0.212 | 0.790 |
+| 2.75 | 0.117 | 0.252 | 0.778 |
+| 3.5 | 0.178 | 0.307 | 0.803 |
+| 5.0 | 0.298 | 0.397 | 0.888 |
+
+Pooled over all 378 images, the lowest NLL is at 2.25, the value fitted on
+text. Fitted on the Commons and drawn sets alone, the temperature is 1.0 (the
+lowest tried), and it raises the signs' NLL from 0.790 to 1.203. Fitted on the
+signs alone, it is 2.75, and it raises the Commons and drawn NLL from 0.134 to
+0.171. The error follows how hard a picture is, and one temperature for all
+images cannot follow that, so the server has none of its own.
 
 ### Chat on the same server
 
@@ -591,8 +656,12 @@ Jev, and `bench/report.py` scores and compares the two.
 | `bench/load.py` | throughput and latency with several requests at once |
 | `bench/fit_temperature.py` | the temperature fit on the case sets |
 | `bench/run_images.py`, `bench/images_commons.jsonl`, `bench/images_drawn.py` | the image questions: the Commons manifest (page, author, license, SHA-256), the drawn images, and the runner |
-| `docs/images/` | the four Commons pictures shown in the README, resized to 480 pixels; the README credits each |
+| `bench/images_signs.jsonl`, `bench/sample_signs.py` | the road signs drawn at random (page, author, license, SHA-256, label, removal), and the draw |
+| `bench/fit_image_temperature.py` | the temperature fit on the image sets |
+| `docs/images/` | the six Commons pictures shown in the README, resized to 480 pixels; the README credits each |
 | `results/images/<set>-<run>.jsonl` | the image answers: `a` and `b` one at a time, `8` eight at a time, at temperature 2.25 |
+| `results/images/signs.jsonl`, `signs-forced.jsonl` | the road-sign answers, with and without "another sign" |
+| `results/images/fit-temperature.{jsonl,txt}` | the image temperature fit |
 
 ## Open items
 
@@ -612,9 +681,11 @@ Jev, and `bench/report.py` scores and compares the two.
   "vLLM backend"). The cause is not found; FlashInfer's autotuner saved no
   configurations, so it is not that. Until it is, a vLLM calibration is one
   start's value.
-- The vLLM temperature was fitted on text. On images it leaves clear pictures
-  underconfident (median 0.954 on a set answered without error); a harder,
-  labeled image set would show whether images need their own value.
+- On images the confidence follows how hard the picture is: too low on clear
+  pictures, too high on small or altered signs when "another sign" is an
+  option (see "A temperature for images"). A temperature cannot fix both; a
+  correction that reads something of the picture, or of how the two copies'
+  readings disagree on it, might.
 - The QAT fit was never rerun with `bench/fit_temperature.py`, which was written
   for the vLLM fit; the GPU was serving vLLM.
 - The temperature was fitted on 98 test questions that gemma-4-26B-A4B nearly
